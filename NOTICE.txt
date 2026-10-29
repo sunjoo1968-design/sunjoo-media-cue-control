@@ -1,0 +1,13 @@
+Sunjoo Media Cue Control 0.5.0
+Copyright (C) 2026 SunjooAn
+SPDX-License-Identifier: GPL-2.0-or-later
+
+Playback uses OBS's existing Media Source. The independent video preview and optional audio-waveform timeline editor
+uses Qt 6 and dynamically links the FFmpeg 8 runtime bundled with OBS.
+OBS Studio: https://obsproject.com/ / https://github.com/obsproject/obs-studio
+FFmpeg: https://ffmpeg.org/
+Qt: https://www.qt.io/ / https://www.qt.io/licensing/open-source-lgpl-obligations
+OBS, FFmpeg and Qt retain their original copyrights and licenses.
+No OBS/FFmpeg/Qt runtime DLLs, SDKs or test modules are included in the binary packages.
+
+

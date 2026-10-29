@@ -1,0 +1,88 @@
+{
+  "version": "0.5.0",
+  "author": "SunjooAn",
+  "date": "2026-10-29",
+  "scope": "64 filters, 4 simultaneous 1080p sources, local 1080p60 recording",
+  "targets": [
+    {
+      "total": 267.0,
+      "checks": {
+        "integration": 64,
+        "preview": 17,
+        "waveform": 18,
+        "stress": 10,
+        "range-mp4": 7,
+        "editor-mp4": 36,
+        "editor-fractional": 36,
+        "whole-mp4": 14,
+        "whole-webm": 14,
+        "preview-audio-mp4": 8,
+        "editor-webm": 36,
+        "range-webm": 7
+      },
+      "dll_sha256": "40A0D9EE34C449B62F9779F40140826EA8BE685E4CFA6E5C1C6077EFF89F7020",
+      "obs_major": "32",
+      "recording": [
+        {
+          "codec_name": "h264",
+          "width": 1920,
+          "height": 1080,
+          "avg_frame_rate": "60/1",
+          "nb_read_frames": "1423"
+        },
+        {
+          "codec_name": "aac",
+          "avg_frame_rate": "0/0",
+          "nb_read_frames": "1112"
+        }
+      ],
+      "metrics": [
+        "METRIC filtered-hidden-64 cpu_one_core_percent=9.373 private_MiB=163.262 frame_ms=0.143 frames=120 lagged=0 elapsed_s=2.000",
+        "METRIC filtered-preview-4 cpu_one_core_percent=32.807 private_MiB=1095.031 frame_ms=0.474 frames=120 lagged=0 elapsed_s=2.000",
+        "METRIC filtered-live-4 cpu_one_core_percent=64.061 private_MiB=1187.188 frame_ms=0.851 frames=180 lagged=0 elapsed_s=3.000",
+        "METRIC filtered-after-cuts-live-4 cpu_one_core_percent=73.044 private_MiB=7944.605 frame_ms=1.005 frames=240 lagged=0 elapsed_s=4.000"
+      ]
+    },
+    {
+      "total": 267.0,
+      "checks": {
+        "integration": 64,
+        "preview": 17,
+        "waveform": 18,
+        "stress": 10,
+        "range-mp4": 7,
+        "editor-mp4": 36,
+        "editor-fractional": 36,
+        "whole-mp4": 14,
+        "whole-webm": 14,
+        "preview-audio-mp4": 8,
+        "editor-webm": 36,
+        "range-webm": 7
+      },
+      "dll_sha256": "E104C624F655F2E110C953F1361194B021EAB3D3CC221FE7C0B6CF49DF9D06E7",
+      "obs_major": "33",
+      "recording": [
+        {
+          "codec_name": "h264",
+          "width": 1920,
+          "height": 1080,
+          "avg_frame_rate": "60/1",
+          "nb_read_frames": "1432"
+        },
+        {
+          "codec_name": "aac",
+          "avg_frame_rate": "0/0",
+          "nb_read_frames": "1119"
+        }
+      ],
+      "metrics": [
+        "METRIC filtered-hidden-64 cpu_one_core_percent=7.030 private_MiB=162.723 frame_ms=0.203 frames=120 lagged=0 elapsed_s=2.000",
+        "METRIC filtered-preview-4 cpu_one_core_percent=86.714 private_MiB=1099.312 frame_ms=0.423 frames=120 lagged=0 elapsed_s=2.000",
+        "METRIC filtered-live-4 cpu_one_core_percent=68.745 private_MiB=1189.734 frame_ms=0.904 frames=180 lagged=0 elapsed_s=3.000",
+        "METRIC filtered-after-cuts-live-4 cpu_one_core_percent=69.919 private_MiB=7947.914 frame_ms=0.917 frames=240 lagged=0 elapsed_s=4.000"
+      ]
+    }
+  ],
+  "total_checks": 534.0,
+  "limitations": "See BROADCAST-REVIEW.md, including retained decoder memory and excluded overload probes."
+}
