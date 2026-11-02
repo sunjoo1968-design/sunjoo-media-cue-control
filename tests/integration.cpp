@@ -69,7 +69,7 @@ int main(int argc,char **argv){
  obs_source_add_audio_capture_callback(mp4.source,audio,nullptr);
  obs_source_inc_showing(obs_scene_get_source(scene));
  preview=obs_scene_get_source(scene);
- auto ready=[](obs_source_t *s){return obs_source_media_get_state(s)==OBS_MEDIA_STATE_PAUSED&&obs_source_media_get_time(s)<40;};
+ auto ready=[](obs_source_t *s){obs_source_t *f=nullptr;obs_source_enum_filters(s,[](obs_source_t*,obs_source_t *child,void *data){if(!strcmp(obs_source_get_unversioned_id(child),"sunjoo_media_cue_control"))*static_cast<obs_source_t**>(data)=obs_source_get_ref(child);},&f);if(!f)return false;auto *p=obs_source_properties(f);std::string status=obs_property_description(obs_properties_get(p,"status"));obs_properties_destroy(p);obs_source_release(f);return status.find("프리뷰 대기")!=std::string::npos&&obs_source_media_get_state(s)==OBS_MEDIA_STATE_PAUSED&&obs_source_media_get_time(s)<150;};
  check(until([&]{return ready(mp4.source)&&ready(webm.source)&&ready(mov.source);}),"MP4 / WebM VP9 Opus / MOV all pause at preview frame zero");
  sleep(400);
  auto first=render(mp4.source);int colored=0;for(size_t i=0;i<first.size();i+=4)colored+=first[i]+first[i+1]+first[i+2]>40;

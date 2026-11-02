@@ -23,9 +23,16 @@ static bool rangeMode=false;
 static bool previewAudioMode=false;
 static bool editorMode=false;
 static bool standbyMode=false,standbyIn=false;
+static bool replayMode=false,replayEof=false,replayIn=false,resetMode=false;
 static std::atomic<int> previewNoise{0},programSound{0};
 static std::atomic<bool> watchPreview{true};
 static void captureAudio(void*,obs_source_t*,const audio_data *d,bool){for(size_t ch=0;ch<audio_output_get_channels(obs_get_audio());++ch)if(d->data[ch]){auto *f=reinterpret_cast<float*>(d->data[ch]);for(uint32_t i=0;i<d->frames;++i)if(f[i]!=0.0f||!std::isfinite(f[i])){if(watchPreview)++previewNoise;else ++programSound;}}}
+// The native clock includes prefetched frames; require actual cue completion too.
+static bool previewReady(obs_source_t *clip,int64_t target=0){
+ auto *filter=obs_source_get_filter_by_name(clip,"Cue Control");if(!filter)return false;
+ auto *p=obs_source_properties(filter);std::string status=obs_property_description(obs_properties_get(p,"status"));obs_properties_destroy(p);obs_source_release(filter);
+ auto state=obs_source_media_get_state(clip);auto time=obs_source_media_get_time(clip);bool ready=status.find("프리뷰 대기")!=std::string::npos&&state==OBS_MEDIA_STATE_PAUSED&&std::abs(time-target)<(target?80:150);if(!ready)blog(LOG_INFO,"[FILTER-UI] Cue observation state=%d time=%lld target=%lld status=%s",state,(long long)time,(long long)target,status.c_str());return ready;
+}
 static uint64_t firstHash=0;
 static uint64_t clipHash(obs_source_t *source){
  uint64_t hash=1469598103934665603ull;
@@ -44,7 +51,7 @@ static bool programImage(){
  gs_stagesurface_destroy(stage);gs_texrender_destroy(rt);obs_leave_graphics();obs_source_release(root);return ok;
 }
 static void finish(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
- if(clip&&(previewAudioMode||editorMode||standbyMode))obs_source_remove_audio_capture_callback(clip,captureAudio,nullptr);
+ if(clip&&(previewAudioMode||editorMode||standbyMode||replayMode||resetMode))obs_source_remove_audio_capture_callback(clip,captureAudio,nullptr);
  if(blank)obs_frontend_set_current_preview_scene(obs_scene_get_source(blank));
  if(clip)obs_source_remove(clip);
  if(media)obs_canvas_scene_remove(media);
@@ -58,7 +65,7 @@ static void previewAudioVisit(obs_source_t *clip,obs_scene_t *blank,obs_scene_t 
   QTimer::singleShot(400,[clip,blank,media,remaining]{
    if(remaining>1){previewAudioVisit(clip,blank,media,remaining-1);return;}
    check(previewNoise==0,"Real 10 preview-away / return cycles contain ZERO nonzero samples on all channels");
-   check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&obs_source_media_get_time(clip)<40,"Real repeated preview return holds first frame paused");
+   check(previewReady(clip),"Real repeated preview return holds first frame paused");
    check(clipHash(clip)==firstHash,"Real repeated preview return keeps the original first GPU picture");
    watchPreview=false;obs_frontend_preview_program_trigger_transition();
    QTimer::singleShot(1000,[clip,blank,media]{blog(LOG_INFO,"[FILTER-UI] audio samples program=%d preview=%d active=%d state=%d time=%lld",programSound.load(),previewNoise.load(),obs_source_active(clip),obs_source_media_get_state(clip),(long long)obs_source_media_get_time(clip));check(programSound>1000,"Audio gate still passes actual program audio after preview cycles");
@@ -146,9 +153,46 @@ static void standbyTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media
     check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&std::abs(obs_source_media_get_time(clip)-time)<40&&clipHash(clip)==firstHash,"Real program still stays fixed until Play");check(previewNoise==0,"Real program standby is exactly silent on all channels");watchPreview=false;auto sound=programSound.load();obs_source_media_play_pause(clip,false);
     QTimer::singleShot(600,[clip,blank,media,target,sound]{
      check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&obs_source_media_get_time(clip)>target+200,"Real user Play resumes from standby cue");check(clipHash(clip)!=firstHash,"Real user Play advances GPU video");check(programSound>sound+1000,"Real user Play restores non-silent program audio");obs_frontend_set_current_preview_scene(obs_scene_get_source(blank));obs_frontend_preview_program_trigger_transition();
-      QTimer::singleShot(1500,[clip,blank,media,target]{
-      check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&std::abs(obs_source_media_get_time(clip)-target)<80,"Real program exit restores silent preview cue");obs_frontend_set_current_preview_scene(obs_scene_get_source(media));obs_frontend_preview_program_trigger_transition();
+      QTimer::singleShot(1800,[clip,blank,media,target]{
+      check(previewReady(clip,target),"Real program exit restores silent preview cue");obs_frontend_set_current_preview_scene(obs_scene_get_source(media));obs_frontend_preview_program_trigger_transition();
       QTimer::singleShot(220,[clip,blank,media,target]{check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&obs_source_media_get_time(clip)>target+40,"Next real preview transition auto plays without an extra Play command");finish(clip,blank,media);});
+     });
+    });
+   });
+  });
+ });
+}
+static void setRange(obs_source_t *clip,double in,double out){auto *f=obs_source_get_filter_by_name(clip,"Cue Control");auto *s=obs_data_create();obs_data_set_double(s,"in_seconds",in);obs_data_set_double(s,"out_seconds",out);obs_source_update(f,s);obs_data_release(s);obs_source_release(f);}
+static void resetRange(obs_source_t *clip){auto *f=obs_source_get_filter_by_name(clip,"Cue Control");auto *p=obs_source_properties(f);obs_property_button_clicked(obs_properties_get(p,"reset_range"),f);obs_properties_destroy(p);obs_source_release(f);}
+static void replayTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
+ const int64_t target=(!replayEof||replayIn)?500:0;const int64_t end=replayEof?obs_source_media_get_duration(clip):2000;
+ check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED,"Replay test starts from silent preview cue");watchPreview=false;obs_frontend_preview_program_trigger_transition();
+ QTimer::singleShot(replayEof?3500:2500,[clip,blank,media,target,end]{
+  auto complete=[clip]{return obs_source_media_get_state(clip)==(replayEof?OBS_MEDIA_STATE_ENDED:OBS_MEDIA_STATE_PAUSED);};check(complete(),"Actual program reaches Out or native EOF");auto picture=clipHash(clip);check(programImage(),"Actual completed program retains a non-black picture");watchPreview=true;previewNoise=0;
+  QTimer::singleShot(300,[clip,blank,media,target,end,picture]{
+   check(clipHash(clip)==picture,"Completion holds final picture until explicit Play");check(previewNoise==0,"Completed program is exactly silent");watchPreview=false;auto sound=programSound.load();obs_source_media_play_pause(clip,false);
+   QTimer::singleShot(1100,[clip,blank,media,target,end,picture,sound]{
+    auto time=obs_source_media_get_time(clip);blog(LOG_INFO,"[FILTER-UI] Replay observation state=%d time=%lld target=%lld",obs_source_media_get_state(clip),(long long)time,(long long)target);check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&time>target+100&&time<end-80,"Play directly after completion restarts first/In range");check(clipHash(clip)!=picture,"Replay advances actual GPU video");check(programSound>sound+1000,"Replay restores real program audio");
+    QTimer::singleShot(replayEof?3300:2100,[clip,blank,media,target,end]{
+     check(obs_source_media_get_state(clip)==(replayEof?OBS_MEDIA_STATE_ENDED:OBS_MEDIA_STATE_PAUSED),"Second playthrough stops at its end again");if(replayEof)obs_source_media_restart(clip);else obs_source_media_play_pause(clip,false);
+     QTimer::singleShot(1100,[clip,blank,media,target,end]{auto t=obs_source_media_get_time(clip);check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&t>target+100&&t<end-80,"Repeated Play or native EOF Restart starts another first/In playthrough");finish(clip,blank,media);});
+    });
+   });
+  });
+ });
+}
+static void resetTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
+ firstHash=clipHash(clip);setRange(clip,0.5,2);
+ QTimer::singleShot(850,[clip,blank,media]{
+  blog(LOG_INFO,"[FILTER-UI] Reset In observation state=%d time=%lld",obs_source_media_get_state(clip),(long long)obs_source_media_get_time(clip));check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&std::abs(obs_source_media_get_time(clip)-500)<80,"Preview prepares middle In");check(clipHash(clip)!=firstHash,"Middle In has a different picture");resetRange(clip);
+  QTimer::singleShot(850,[clip,blank,media]{
+   check(previewReady(clip),"Whole range restores preview zero clock");check(clipHash(clip)==firstHash,"Whole range restores exact first preview picture");watchPreview=false;obs_frontend_preview_program_trigger_transition();
+   QTimer::singleShot(350,[clip,blank,media]{check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING,"Range reset preserves transition auto playback");obs_source_media_stop(clip);
+    QTimer::singleShot(850,[clip,blank,media]{check(clipHash(clip)==firstHash,"Program Stop after reset cannot use previous In poster");setRange(clip,0.5,2);
+     QTimer::singleShot(850,[clip,blank,media]{check(std::abs(obs_source_media_get_time(clip)-500)<80,"Program still accepts a new In");resetRange(clip);
+      QTimer::singleShot(850,[clip,blank,media]{check(clipHash(clip)==firstHash,"Whole range restores program standby first picture");watchPreview=true;previewNoise=0;
+       QTimer::singleShot(250,[clip,blank,media]{check(previewNoise==0,"Reset program standby remains silent");finish(clip,blank,media);});
+      });
      });
     });
    });
@@ -157,6 +201,7 @@ static void standbyTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media
 }
 static void run(){
  hostBaseline=qEnvironmentVariableIsSet("CUE_HOST_BASELINE");
+ replayMode=(qEnvironmentVariableIntValue("FILTER_TEST_REPLAY")==1);replayEof=(qEnvironmentVariableIntValue("FILTER_TEST_EOF")==1);replayIn=(qEnvironmentVariableIntValue("FILTER_TEST_REPLAY_IN")==1);resetMode=(qEnvironmentVariableIntValue("FILTER_TEST_RESET")==1);
  editorMode=(qEnvironmentVariableIntValue("FILTER_TEST_EDITOR")==1);
  standbyMode=(qEnvironmentVariableIntValue("FILTER_TEST_STANDBY")==1);standbyIn=(qEnvironmentVariableIntValue("FILTER_TEST_STANDBY_IN")==1);
  auto *settings=obs_data_create();obs_data_set_string(settings,"local_file",(editorMode||standbyMode)?((qEnvironmentVariableIntValue("FILTER_TEST_FRACTIONAL")==1)?TEST_FRACTIONAL_FILE:(qEnvironmentVariableIntValue("FILTER_TEST_WEBM")==1)?TEST_EDITOR_WEBM_FILE:TEST_EDITOR_FILE):((qEnvironmentVariableIntValue("FILTER_TEST_WEBM")==1)?TEST_WEBM_FILE:TEST_FILE));
@@ -165,9 +210,9 @@ static void run(){
  auto *clip=obs_source_create("ffmpeg_source","Media Cue Filter UI test",settings,nullptr);obs_data_release(settings);
  previewAudioMode=(qEnvironmentVariableIntValue("FILTER_TEST_PREVIEW_AUDIO")==1);
  if(editorMode)watchPreview=false;
- if(clip&&(previewAudioMode||editorMode||standbyMode))obs_source_add_audio_capture_callback(clip,captureAudio,nullptr);
+ if(clip&&(previewAudioMode||editorMode||standbyMode||replayMode||resetMode))obs_source_add_audio_capture_callback(clip,captureAudio,nullptr);
  rangeMode=(qEnvironmentVariableIntValue("FILTER_TEST_RANGE")==1);
- auto *rangeSettings=obs_data_create();if(rangeMode||standbyIn){obs_data_set_double(rangeSettings,"in_seconds",0.5);obs_data_set_double(rangeSettings,"out_seconds",standbyIn?2.0:1.2);}
+ auto *rangeSettings=obs_data_create();if(rangeMode||standbyIn||(replayMode&&(!replayEof||replayIn))){obs_data_set_double(rangeSettings,"in_seconds",0.5);obs_data_set_double(rangeSettings,"out_seconds",standbyIn?2.0:replayMode?(replayEof?0.0:2.0):1.2);}
  auto *control=obs_source_create("sunjoo_media_cue_control","Cue Control",rangeSettings,nullptr);obs_data_release(rangeSettings); if(clip&&control)obs_source_filter_add(clip,control);obs_source_release(control);
  check(clip!=nullptr,"Source discovered through real OBS plugin loader");if(!clip){finish(nullptr,nullptr,nullptr);return;}
  auto *blank=obs_scene_create("Cue Blank"),*media=obs_scene_create("Cue Preview");auto *item=obs_scene_add(media,clip);
@@ -179,6 +224,7 @@ static void run(){
  obs_frontend_source_list_free(&list);obs_frontend_set_transition_duration(600);
  QTimer::singleShot(1200,[clip,blank,media]{
   if(standbyMode){standbyTest(clip,blank,media);return;}
+  if(replayMode){replayTest(clip,blank,media);return;}if(resetMode){resetTest(clip,blank,media);return;}
   if(editorMode){editorTest(clip,blank,media);return;}
   if(previewAudioMode){firstHash=clipHash(clip);check(previewNoise==0,"Real initial preview preparation is silent");previewAudioVisit(clip,blank,media,10);return;}
   if(rangeMode){
@@ -201,7 +247,7 @@ static void run(){
   }
   check(obs_frontend_preview_program_mode_active(),"Real Studio Mode enabled");
   firstHash=clipHash(clip);
-  check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&obs_source_media_get_time(clip)<40,"Real preview holds first frame paused");
+  check(previewReady(clip),"Real preview holds first frame paused");
   auto *f=obs_source_get_filter_by_name(clip,"Cue Control");auto *p=obs_source_properties(f);obs_source_release(f);check(p&&obs_properties_get(p,"creator"),"Source status and author/version properties available");obs_properties_destroy(p);
   obs_frontend_preview_program_trigger_transition();
   QTimer::singleShot(220,[clip]{check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&obs_source_media_get_time(clip)>40,"Real Studio fade starts playback before fade completion");check(clipHash(clip)!=firstHash,"GPU picture actually advances during fade, not only media clock");});
@@ -214,7 +260,7 @@ static void run(){
     check(programImage(),"Real OBS program output contains media pixels (GPU readback)");
     obs_frontend_set_current_preview_scene(obs_scene_get_source(blank));obs_frontend_preview_program_trigger_transition();
     QTimer::singleShot(1000,[clip,blank,media]{
-     check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&obs_source_media_get_time(clip)<40,"Leaving real program re-arms preview frame zero");
+     check(previewReady(clip),"Leaving real program re-arms preview frame zero");
      check(clipHash(clip)==firstHash,"Real preview returns to original first picture exactly");
      obs_frontend_source_list transitions={};obs_frontend_get_transitions(&transitions);bool found=false;
      for(size_t i=0;i<transitions.sources.num;++i)if(!strcmp(obs_source_get_id(transitions.sources.array[i]),"cut_transition")){obs_frontend_set_current_transition(transitions.sources.array[i]);found=true;}
@@ -223,7 +269,7 @@ static void run(){
      QTimer::singleShot(150,[clip,blank,media]{
       check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&obs_source_media_get_time(clip)>40,"Real CUT starts media playback");
       obs_frontend_set_current_preview_scene(obs_scene_get_source(blank));obs_frontend_preview_program_trigger_transition();
-      QTimer::singleShot(500,[clip,blank,media]{check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&obs_source_media_get_time(clip)<40,"Real CUT out re-arms media");finish(clip,blank,media);});
+      QTimer::singleShot(500,[clip,blank,media]{check(previewReady(clip),"Real CUT out re-arms media");finish(clip,blank,media);});
      });
     });
    });
@@ -233,5 +279,3 @@ static void run(){
 static void event(enum obs_frontend_event e,void*){if(e==OBS_FRONTEND_EVENT_FINISHED_LOADING)QTimer::singleShot(1000,run);}
 bool obs_module_load(){obs_frontend_add_event_callback(event,nullptr);return true;}
 void obs_module_unload(){obs_frontend_remove_event_callback(event,nullptr);}
-
-

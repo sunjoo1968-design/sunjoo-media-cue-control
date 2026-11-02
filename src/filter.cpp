@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <unordered_set>
+#include <unordered_map>
 #include <util/platform.h>
 #include "editor.hpp"
 
@@ -18,7 +20,23 @@ namespace {
 constexpr const char *options[] = {"restart_on_activate", "close_when_inactive", "clear_on_media_end"};
 // Video-thread-only scheduler: spread native decoder destruction across frames.
 uint64_t nextIdleRelease=0;
-struct VisibleSearch {obs_source_t *target;bool found=false;unsigned depth=0;};
+// Built once per video frame (or topology change), shared by every controller.
+// UUIDs and weak scene watches never keep an unused decoder alive.
+struct VisibilityCache {
+ std::atomic<uint64_t> revision{1},queries{0},scans{0};
+ uint64_t frame=0,builtRevision=0;
+ std::unordered_set<std::string> visible;
+ struct Watch {obs_weak_source_t *weak;signal_handler_t *signals;};
+ std::unordered_map<std::string,Watch> watches;
+ static void changed(void *data,calldata_t*){++static_cast<VisibilityCache*>(data)->revision;}
+ void unwatch(const Watch &w){for(auto key:{"item_visible","item_add","item_remove"})signal_handler_disconnect(w.signals,key,changed,this);obs_weak_source_release(w.weak);}
+ void watch(obs_source_t *source){auto id=std::string(obs_source_get_uuid(source));auto old=watches.find(id);if(old!=watches.end()){if(!obs_weak_source_expired(old->second.weak))return;unwatch(old->second);watches.erase(old);}Watch w{obs_source_get_weak_source(source),obs_source_get_signal_handler(source)};for(auto key:{"item_visible","item_add","item_remove"})signal_handler_connect_ref(w.signals,key,changed,this);watches.emplace(id,w);}
+ // Keep only the handler alive for disconnection; never acquire scene/source
+ // strong references while pruning or shutting down.
+ void prune(bool all=false){for(auto i=watches.begin();i!=watches.end();){if(all||obs_weak_source_expired(i->second.weak)){unwatch(i->second);i=watches.erase(i);}else ++i;}}
+ void connect(bool enable){for(auto key:{"source_activate","source_deactivate","source_show","source_hide","source_transition_start","source_transition_stop","channel_change","source_remove","source_destroy"}){if(enable)signal_handler_connect(obs_get_signal_handler(),key,changed,this);else signal_handler_disconnect(obs_get_signal_handler(),key,changed,this);}if(!enable){prune(true);visible.clear();}}
+} visibility;
+struct VisibleSearch {std::unordered_set<obs_source_t*> visited;unsigned depth=0;};
 void visibleSource(obs_source_t *source,VisibleSearch &search);
 bool visibleItem(obs_scene_t*,obs_sceneitem_t *item,void *param) {
  auto &search=*static_cast<VisibleSearch*>(param);
@@ -26,14 +44,14 @@ bool visibleItem(obs_scene_t*,obs_sceneitem_t *item,void *param) {
  if(search.depth<64) {
   ++search.depth;visibleSource(obs_sceneitem_get_source(item),search);--search.depth;
  }
- return !search.found;
+ return true;
 }
 void visibleSource(obs_source_t *source,VisibleSearch &search) {
- if(!source||search.found||search.depth>=64)return;
- if(source==search.target){search.found=true;return;}
+ if(!source||search.depth>=64||!search.visited.insert(source).second)return;
+ visibility.visible.insert(obs_source_get_uuid(source));
  auto *scene=obs_scene_from_source(source);
  if(!scene)scene=obs_group_from_source(source);
- if(scene)obs_scene_enum_items(scene,visibleItem,&search);
+ if(scene){visibility.watch(source);obs_scene_enum_items(scene,visibleItem,&search);}
  else if(obs_source_get_type(source)==OBS_SOURCE_TYPE_TRANSITION) {
   ++search.depth;
   for(auto side:{OBS_TRANSITION_SOURCE_A,OBS_TRANSITION_SOURCE_B}) {
@@ -44,24 +62,32 @@ void visibleSource(obs_source_t *source,VisibleSearch &search) {
 }
 bool visibleScene(void *param,obs_source_t *source) {
  auto &search=*static_cast<VisibleSearch*>(param);
- if(obs_source_showing(source))obs_scene_enum_items(obs_scene_from_source(source),visibleItem,&search);
- return !search.found;
+ // enum_scenes includes groups. A group's retained showing count must not
+ // bypass the eye state of its parent item by treating it as a root view.
+ if(obs_source_showing(source)&&obs_scene_from_source(source))visibleSource(source,search);
+ return true;
 }
 bool visibleInScene(obs_source_t *source) {
- VisibleSearch search{source};
- // Studio Mode's program scene is a private duplicate, absent from enum_scenes.
- auto *output=obs_get_output_source(0);visibleSource(output,search);obs_source_release(output);
- if(!search.found)obs_enum_scenes(visibleScene,&search);return search.found;
+ ++visibility.queries;const auto frame=obs_get_video_frame_time(),revision=visibility.revision.load();
+ if(visibility.frame!=frame||visibility.builtRevision!=revision){
+  visibility.frame=frame;visibility.builtRevision=revision;visibility.visible.clear();VisibleSearch search;
+  // Studio Mode program copies are private and absent from enum_scenes.
+  auto *output=obs_get_output_source(0);visibleSource(output,search);obs_source_release(output);
+  obs_enum_scenes(visibleScene,&search);++visibility.scans;
+  if(visibility.scans%256==0)visibility.prune();
+ }
+ return visibility.visible.count(obs_source_get_uuid(source))!=0;
 }
 struct Control {
- struct StillFrame {obs_source_frame *frame;explicit StillFrame(const obs_source_frame *src):frame(obs_source_frame_create(src->format,src->width,src->height)){obs_source_frame_copy(frame,src);}~StillFrame(){obs_source_frame_destroy(frame);}};
+ struct StillFrame {obs_source_frame *frame;int64_t target;uint64_t generation;StillFrame(const obs_source_frame *src,int64_t at,uint64_t gen):frame(obs_source_frame_create(src->format,src->width,src->height)),target(at),generation(gen){obs_source_frame_copy(frame,src);}~StillFrame(){obs_source_frame_destroy(frame);}};
  obs_source_t *self;
  obs_weak_source_t *parent = nullptr;
  std::recursive_mutex mutex;
  bool managed = false, wasActive = false, wasShowing = false, armed = false, enabled = false;
  std::atomic<bool> mutePreview{false};
  std::atomic<int64_t> audioOut{0};
- bool preparing=false, priming=false, rangeEnded=false, offStopped=false, loopManaged=false, invalidRange=false, waitingRestart=false;
+ std::atomic<bool> preparing{false};
+ bool priming=false, rangeEnded=false, offStopped=false, loopManaged=false, invalidRange=false, waitingRestart=false;
  int64_t inMs=0,outMs=0,cueIn=0,runIn=0,runOut=0;
  uint64_t revision=1,appliedRevision=0,prepareAt=0;
  std::string path;
@@ -70,30 +96,41 @@ struct Control {
  int idlePhase=0;bool unloaded=false;
  std::string idleOptions;
  std::atomic<bool> programHold{false},stopRequest{false},playRequest{false},restartRequest{false};
- std::atomic<unsigned> ownStops{0},ownPlays{0},ownRestarts{0};
+ std::atomic<unsigned> ownStops{0},ownPlays{0},ownRestarts{0},ownPauses{0};
  bool playAfterCue=false;std::atomic<bool> releasingZero{false};
  std::shared_ptr<StillFrame> still,candidate;
+ std::atomic<uint64_t> captureGeneration{0},prepareRequests{0},prepares{0},coalesced{0};
+ std::atomic<bool> ended{false};
  std::atomic<bool> captureStill{true};std::atomic<int64_t> captureIn{0};
- uint64_t settleAt=0;int64_t stillIn=-1;bool reuseStill=false;
- void showStill(obs_source_t *source){auto image=std::atomic_load(&still);if(!image)image=std::atomic_load(&candidate);if(image){obs_source_output_video(source,image->frame);obs_source_set_video_frame(source,image->frame);}else obs_source_show_preloaded_video(source);}
+ std::atomic<int64_t> preloadIn{-1};
+ uint64_t settleAt=0;int64_t stillIn=-1;bool reuseStill=false,seekPending=false;int zeroFallback=0;
+ std::atomic<bool> freezeVideo{false};std::atomic<uint64_t> videoSerial{0},posterTs{UINT64_MAX};uint64_t warmSerial=0;
+ void showStill(obs_source_t *source){auto target=captureIn.load();auto image=std::atomic_load(&still);if(image&&image->target!=target)image.reset();if(!image){image=std::atomic_load(&candidate);if(image&&(image->target!=target||image->generation!=captureGeneration))image.reset();}if(image){posterTs=image->frame->timestamp;obs_source_output_video(source,image->frame);obs_source_set_video_frame(source,image->frame);preloadIn=target;}else if(preloadIn==target)obs_source_show_preloaded_video(source);}
  obs_source_frame *video(obs_source_frame *frame){
-  if(frame&&captureStill&&frame->width&&frame->height&&frame->width<=8192&&frame->height<=8192){auto *source=obs_filter_get_parent(self);if(source){auto target=captureIn.load(),time=obs_source_media_get_time(source);if(time>=std::max<int64_t>(0,target-80)&&time<=target+100&&(target>0||!std::atomic_load(&candidate))){std::atomic_store(&candidate,std::make_shared<StillFrame>(frame));}}}
-  if(programHold&&frame){obs_source_release_frame(obs_filter_get_parent(self),frame);return nullptr;}
+  if(frame&&frame->timestamp!=posterTs)++videoSerial;
+  if(frame&&captureStill&&frame->width&&frame->height&&frame->width<=8192&&frame->height<=8192){
+   auto *source=obs_filter_get_parent(self);
+   if(source){auto target=captureIn.load(),time=obs_source_media_get_time(source);auto gen=captureGeneration.load();
+    if(target>0&&time>=std::max<int64_t>(0,target-80)&&time<=target+100){auto image=std::make_shared<StillFrame>(frame,target,gen);if(captureStill&&gen==captureGeneration&&target==captureIn)std::atomic_store(&candidate,image);}
+   }
+  }
+  if((programHold||freezeVideo)&&frame){obs_source_release_frame(obs_filter_get_parent(self),frame);return nullptr;}
   return frame;
  }
  static bool consume(std::atomic<unsigned> &count){auto n=count.load();while(n){if(count.compare_exchange_weak(n,n-1))return true;}return false;}
- void playNative(obs_source_t *source,bool pause){if(!pause)++ownPlays;obs_source_media_play_pause(source,pause);}
+ void playNative(obs_source_t *source,bool pause){if(pause){if(ownPauses)return;++ownPauses;}else ++ownPlays;obs_source_media_play_pause(source,pause);}
  void restartNative(obs_source_t *source){++ownRestarts;obs_source_media_restart(source);}
  void stopNative(obs_source_t *source){++ownStops;obs_source_media_stop(source);}
  void releaseHold(obs_source_t *source){
   // Restart zero-cues on Play so tick-sized silent preroll is never skipped.
   // Keep the poster gate until the native restart clears async_active.
-  playAfterCue=false;if(cueIn==0){releasingZero=true;restartNative(source);}else programHold=false;
+  ended=false;freezeVideo=false;playAfterCue=false;if(cueIn==0){releasingZero=true;restartNative(source);}else programHold=false;
   playNative(source,false);
  }
  static void stopped(void *data,calldata_t *event){
-  auto *c=static_cast<Control*>(data);if(consume(c->ownStops))return;
+  auto *c=static_cast<Control*>(data);
   auto *source=static_cast<obs_source_t*>(calldata_ptr(event,"source"));
+  if(consume(c->ownStops)){if(source&&c->preparing&&c->captureIn==0&&c->preloadIn==0)c->showStill(source);return;}
   if(source&&obs_source_enabled(c->self)&&obs_source_active(source)){
    c->programHold=true;c->mutePreview=true;c->releasingZero=false;c->playRequest=false;c->restartRequest=false;c->stopRequest=true;
    // STOP clears async_active before emitting this signal. Expose the existing
@@ -101,10 +138,12 @@ struct Control {
    c->showStill(source);
   }
  }
- static void played(void *data,calldata_t*){auto *c=static_cast<Control*>(data);if(!consume(c->ownPlays)&&c->programHold)c->playRequest=true;}
- static void restarted(void *data,calldata_t *event){auto *c=static_cast<Control*>(data);const bool internal=consume(c->ownRestarts);if(c->programHold){auto *source=static_cast<obs_source_t*>(calldata_ptr(event,"source"));if(source)c->showStill(source);if(internal&&c->releasingZero.exchange(false))c->programHold=false;else if(!internal){c->restartRequest=true;c->playRequest=true;}}}
+ static void played(void *data,calldata_t*){auto *c=static_cast<Control*>(data);if(!consume(c->ownPlays))c->playRequest=true;}
+ static void paused(void *data,calldata_t*){consume(static_cast<Control*>(data)->ownPauses);}
+ static void finished(void *data,calldata_t *event){auto *c=static_cast<Control*>(data);auto *s=static_cast<obs_source_t*>(calldata_ptr(event,"source"));if(s&&!c->preparing&&!c->programHold&&obs_source_enabled(c->self)&&obs_source_active(s)){c->ended=true;c->mutePreview=true;}}
+ static void restarted(void *data,calldata_t *event){auto *c=static_cast<Control*>(data);const bool internal=consume(c->ownRestarts);if(c->programHold){auto *source=static_cast<obs_source_t*>(calldata_ptr(event,"source"));if(source)c->showStill(source);if(internal&&c->releasingZero.exchange(false))c->programHold=false;}if(!internal){c->restartRequest=true;c->playRequest=true;}}
  static void parentUpdated(void *data,calldata_t*){++static_cast<Control*>(data)->parentRevision;}
- explicit Control(obs_source_t *source) : self(source) {}
+ explicit Control(obs_source_t *source) : self(source) {proc_handler_add(obs_source_get_proc_handler(self),"void cue_metrics(out int visibility_queries, out int visibility_scans, out int prepare_requests, out int prepares, out int coalesced)",[](void *d,calldata_t *v){auto *c=static_cast<Control*>(d);calldata_set_int(v,"visibility_queries",visibility.queries);calldata_set_int(v,"visibility_scans",visibility.scans);calldata_set_int(v,"prepare_requests",c->prepareRequests);calldata_set_int(v,"prepares",c->prepares);calldata_set_int(v,"coalesced",c->coalesced);},this);}
  ~Control() { detach(); }
  void attach(obs_source_t *source) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -116,6 +155,8 @@ struct Control {
   signal_handler_connect(obs_source_get_signal_handler(source),"media_stopped",stopped,this);
   signal_handler_connect(obs_source_get_signal_handler(source),"media_play",played,this);
   signal_handler_connect(obs_source_get_signal_handler(source),"media_restart",restarted,this);
+  signal_handler_connect(obs_source_get_signal_handler(source),"media_ended",finished,this);
+  signal_handler_connect(obs_source_get_signal_handler(source),"media_pause",paused,this);
   auto *saved = obs_source_get_settings(self);
   if (!obs_data_get_bool(saved, "saved_options")) {
    auto *settings = obs_source_get_settings(source);
@@ -156,7 +197,7 @@ struct Control {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if (!parent) return;
   auto *source = obs_weak_source_get_source(parent);
-  if (source) {auto *signals=obs_source_get_signal_handler(source);signal_handler_disconnect(signals,"update",parentUpdated,this);signal_handler_disconnect(signals,"media_stopped",stopped,this);signal_handler_disconnect(signals,"media_play",played,this);signal_handler_disconnect(signals,"media_restart",restarted,this);restore(source);obs_source_release(source);}
+  if (source) {auto *signals=obs_source_get_signal_handler(source);signal_handler_disconnect(signals,"update",parentUpdated,this);signal_handler_disconnect(signals,"media_stopped",stopped,this);signal_handler_disconnect(signals,"media_play",played,this);signal_handler_disconnect(signals,"media_restart",restarted,this);signal_handler_disconnect(signals,"media_ended",finished,this);signal_handler_disconnect(signals,"media_pause",paused,this);restore(source);obs_source_release(source);}
   obs_weak_source_release(parent);parent=nullptr;
  }
  void update(obs_data_t *settings) {
@@ -165,45 +206,54 @@ struct Control {
   auto in=value(obs_data_get_double(settings,"in_seconds")),out=value(obs_data_get_double(settings,"out_seconds"));
   if(in!=inMs||out!=outMs){inMs=in;outMs=out;++revision;}
  }
- void prepare(obs_source_t *source,obs_media_state state,int64_t target) {
-  mutePreview=true;
-  auto oldTarget=captureIn.load();auto previous=std::atomic_load(&candidate);if(previous&&!std::atomic_load(&still)){std::atomic_store(&still,previous);stillIn=oldTarget;}
-  // Keep a verified cue poster across preview visits too. Native preload
-  // bypasses filter_video; a later queued frame must not replace that poster.
-  reuseStill=stillIn==target&&bool(std::atomic_load(&still));captureStill=!reuseStill;captureIn=target;settleAt=0;std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});
-  waitingRestart=unloaded||state==OBS_MEDIA_STATE_ENDED||state==OBS_MEDIA_STATE_STOPPED||state==OBS_MEDIA_STATE_NONE;
-  unloaded=false;
-  if(waitingRestart)restartNative(source);
-  else {playNative(source,target==0&&!programHold);obs_source_media_set_time(source,target);}
-  cueIn=target;preparing=true;priming=target>0;armed=false;rangeEnded=false;prepareAt=os_gettime_ns();appliedRevision=revision;
+ void prepare(obs_source_t *source,obs_media_state state,int64_t target,bool force=false) {
+  ++prepareRequests;if(!force&&preparing&&!unloaded&&cueIn==target&&appliedRevision==revision){++coalesced;return;}++prepares;preparing=true;ended=false;mutePreview=true;freezeVideo=true;
+  reuseStill=stillIn==target&&bool(std::atomic_load(&still));captureStill=false;++captureGeneration;captureIn=target;std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});if(!reuseStill)std::atomic_store(&still,std::shared_ptr<StillFrame>{});
+  cueIn=target;settleAt=0;zeroFallback=0;seekPending=true;warmSerial=videoSerial;
+  waitingRestart=unloaded||state==OBS_MEDIA_STATE_ENDED||state==OBS_MEDIA_STATE_STOPPED||state==OBS_MEDIA_STATE_NONE;unloaded=false;
+  if(target==0&&preloadIn==0){waitingRestart=false;seekPending=false;zeroFallback=3;stopNative(source);}
+  else if(waitingRestart)restartNative(source);else if(state!=OBS_MEDIA_STATE_PLAYING)playNative(source,false);
+  priming=true;armed=false;rangeEnded=false;prepareAt=os_gettime_ns();appliedRevision=revision;
  }
  void prepareTick(obs_source_t *source,bool active) {
-  if(os_gettime_ns()-prepareAt<((cueIn>0||programHold)&&!waitingRestart?20000000ull:80000000ull))return;
-  // Seek while decoding, not while paused: the native paused-seek path flushes
-  // audio after preloading video, which can leave an audio-only catch-up gap.
-  if(waitingRestart){waitingRestart=false;playNative(source,cueIn==0&&!programHold);obs_source_media_set_time(source,cueIn);prepareAt=os_gettime_ns();return;}
+  auto now=os_gettime_ns();auto state=obs_source_media_get_state(source);
+  if(waitingRestart){if(now-prepareAt<80000000ull)return;waitingRestart=false;warmSerial=videoSerial;if(state!=OBS_MEDIA_STATE_PLAYING)playNative(source,false);prepareAt=now;return;}
+  if(seekPending){
+   if(state==OBS_MEDIA_STATE_ENDED||state==OBS_MEDIA_STATE_STOPPED||state==OBS_MEDIA_STATE_NONE){if(!ownRestarts)restartNative(source);waitingRestart=true;prepareAt=now;return;}
+   if(state!=OBS_MEDIA_STATE_PLAYING){if(!ownPlays)playNative(source,false);return;}
+   // Metadata PLAYING is not a decoder acknowledgement. Observe live frames
+   // before seeking so FFmpeg has consumed its resume/reset-timestamp action.
+   if(videoSerial<warmSerial+2&&now-prepareAt<500000000ull)return;
+   captureStill=false;++captureGeneration;std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});
+   obs_source_output_video(source,nullptr);captureStill=!reuseStill;preloadIn=-1;obs_source_media_set_time(source,cueIn);seekPending=false;prepareAt=now;return;
+  }
+  // Frame zero uses the exact native paused preload, never a later frame
+  // guessed from FFmpeg's prefetched clock. Stop then re-arm without seeking
+  // again so decoder pacing is reset before the next real Play. The queued
+  // Pause is acknowledged before publishing the cue as ready.
+  if(zeroFallback){
+   if(zeroFallback==1){if(state!=OBS_MEDIA_STATE_PAUSED){playNative(source,true);return;}obs_source_media_set_time(source,0);zeroFallback=2;prepareAt=now;return;}
+   if(zeroFallback==2){if(now-prepareAt<80000000ull)return;obs_source_output_video(source,nullptr);obs_source_show_preloaded_video(source);preloadIn=0;stopNative(source);zeroFallback=3;prepareAt=now;return;}
+   if(zeroFallback==3){if(ownStops||now-prepareAt<50000000ull||obs_source_media_get_time(source)>150)return;restartNative(source);playNative(source,true);zeroFallback=4;prepareAt=now;return;}
+   if(ownPauses)return;
+   // A late native Stop completion or user Play can overwrite PAUSED metadata.
+   // Reassert the silent hold; zero playback always restarts both streams.
+   if(state!=OBS_MEDIA_STATE_PAUSED){playNative(source,true);return;}
+   obs_source_output_video(source,nullptr);obs_source_show_preloaded_video(source);captureStill=false;preparing=false;armed=!active;if(active){programHold=true;releaseHold(source);}return;
+  }
+  if(cueIn==0){if(now-prepareAt<200000000ull)return;captureStill=false;zeroFallback=1;playNative(source,true);return;}
+  if(now-prepareAt<20000000ull)return;
   auto pos=obs_source_media_get_time(source);
-  // Native seeking can land at an earlier keyframe. Decode silently up to In.
-  if(pos<cueIn-20) {
-   if(!priming){playNative(source,false);priming=true;}
-   return;
-  }
-  // Zero standby already has its exact poster and resets on Play. Waiting for
-  // an overshot clock here would only decode another half-second silently.
-  if(pos>cueIn+80&&!(programHold&&cueIn==0)&&os_gettime_ns()-prepareAt<500000000)return;
-  // Do not seek again while paused: FFmpeg flushes audio after video preload.
-  // The poster is exact; zero-cue playback resets both streams in releaseHold.
-  if(!active&&!settleAt){playNative(source,true);settleAt=os_gettime_ns()+50000000ull;return;}
-  if(!active&&os_gettime_ns()<settleAt)return;
-  captureStill=false;auto image=reuseStill?std::atomic_load(&still):std::atomic_load(&candidate);if(image){std::atomic_store(&still,image);stillIn=cueIn;}
-  if(image&&!active){showStill(source);}
-  else if(cueIn==0) {
-   // Drop frames queued during native restart; they must not overwrite the
-   // seek-to-zero preload after a rapid preview hide/show cycle.
-   obs_source_output_video(source,nullptr);obs_source_show_preloaded_video(source);
-  }
+  if(pos<cueIn-20){if(state==OBS_MEDIA_STATE_PAUSED&&!ownPlays)playNative(source,false);return;}
+  auto image=reuseStill?std::atomic_load(&still):std::atomic_load(&candidate);
+  if(image&&(image->target!=cueIn||(!reuseStill&&image->generation!=captureGeneration)))image.reset();
+  if(cueIn>0&&pos>cueIn+80&&now-prepareAt<500000000ull)return;
+  if(!active&&!settleAt){playNative(source,true);settleAt=now+50000000ull;return;}
+  if(!active&&(now<settleAt||state!=OBS_MEDIA_STATE_PAUSED)){if(state!=OBS_MEDIA_STATE_PAUSED)playNative(source,true);return;}
+  captureStill=false;
+  if(image){std::atomic_store(&still,image);stillIn=cueIn;showStill(source);}
   preparing=false;armed=!active;
-  playNative(source,!active);
+  if(active){freezeVideo=false;playNative(source,false);}
  }
  void tick() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
@@ -213,7 +263,7 @@ struct Control {
   if(!run) {
    mutePreview=false;
    restore(source);enabled=false;armed=false;wasActive=false;wasShowing=false;preparing=false;offStopped=false;idleAt=0;
-   programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;
+   programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;freezeVideo=false;
    obs_source_release(source);return;
   }
   if(strcmp(obs_source_get_unversioned_id(source),"ffmpeg_source")) {mutePreview=false;obs_source_release(source);return;}
@@ -247,7 +297,7 @@ struct Control {
   // Inspect scene-item visibility too: OBS can retain show/active counts briefly
   // while the eye-OFF audio transition is draining.
   if(!visible||(!showing&&!active)) {
-   programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;
+   programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;freezeVideo=false;
    // A managed clip that leaves both buses must not continue decoding/audio.
    // Issue once on departure; do not repeatedly control unrelated hidden items.
    if(managed&&(wasShowing||wasActive||preparing)) {mutePreview=true;stopNative(source);offStopped=true;}
@@ -275,7 +325,7 @@ struct Control {
       // codec, rate, color range or source identity. Unlike STOP, reinitializing
       // also destroys an already stopped decoder. Restore exact options next.
       obs_data_set_string(settings,"ffmpeg_options",(idleOptions+" ").c_str());obs_data_set_bool(settings,"close_when_inactive",true);obs_data_set_bool(settings,"restart_on_activate",true);
-      captureStill=false;std::atomic_store(&still,std::shared_ptr<StillFrame>{});std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});
+      captureStill=false;std::atomic_store(&still,std::shared_ptr<StillFrame>{});std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});preloadIn=-1;++captureGeneration;
       stopNative(source);
       mutePreview=true;refreshRevision=parentRevision.load();idlePhase=1;managed=true;obs_source_update(source,settings);nextIdleRelease=now+100000000ull;
      }
@@ -289,7 +339,7 @@ struct Control {
   if(!obs_data_get_bool(settings,"is_local_file")) {mutePreview=false;obs_data_release(settings);obs_source_release(source);return;}
   std::string current=obs_data_get_string(settings,"local_file");
   bool changed=current!=path;
-  if(changed){std::atomic_store(&still,std::shared_ptr<StillFrame>{});std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});stillIn=-1;captureStill=true;captureIn=inMs;if(programHold)stopRequest=true;}
+  if(changed){ended=false;std::atomic_store(&still,std::shared_ptr<StillFrame>{});std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});preloadIn=-1;++captureGeneration;stillIn=-1;captureStill=true;captureIn=inMs;if(programHold)stopRequest=true;}
   bool settingsChanged=false;
   for(const char *key:options) if(obs_data_get_bool(settings,key)) {obs_data_set_bool(settings,key,false);settingsChanged=true;}
   const auto loopIn=active&&wasActive?runIn:inMs,loopOut=active&&wasActive?runOut:outMs;
@@ -319,6 +369,10 @@ struct Control {
   if(invalidRange){playNative(source,true);mutePreview=true;armed=false;preparing=false;enabled=true;wasShowing=showing;wasActive=active;obs_source_release(source);return;}
   offStopped=false;
   if(active) {
+   if(!programHold&&playRequest.exchange(false)){
+    const bool eof=ended.load(),restart=restartRequest.exchange(false);const bool replay=rangeEnded||eof||restart;
+    if(replay){programHold=true;playAfterCue=true;rangeEnded=false;runIn=inMs;runOut=outMs>0?(duration>0?std::min(outMs,duration):outMs):0;audioOut=runOut;preparing=false;prepare(source,eof?OBS_MEDIA_STATE_ENDED:state,inMs);}
+   }
    if(stopRequest.exchange(false)){
     programHold=true;playAfterCue=false;preparing=false;rangeEnded=false;
     runIn=inMs;runOut=outMs>0?(duration>0?std::min(outMs,duration):outMs):0;audioOut=runOut;
@@ -340,18 +394,18 @@ struct Control {
    }
    // Attaching/enabling on an already-live source must not rewind it.
    if(!wasActive) {
-    if(armed&&!preparing)playNative(source,false);
+    if(armed&&!preparing){if(cueIn==0){programHold=true;releaseHold(source);}else {freezeVideo=false;playNative(source,false);}}
     else if(!preparing&&(unloaded||(enabled&&state!=OBS_MEDIA_STATE_PLAYING)||inMs>0))prepare(source,state,inMs);
    }
    if(preparing)prepareTick(source,true);
-   if(!preparing&&runOut>0&&obs_source_media_get_time(source)>=runOut){playNative(source,true);rangeEnded=true;}
+   if(!preparing&&!rangeEnded&&runOut>0&&obs_source_media_get_time(source)>=runOut){playNative(source,true);rangeEnded=true;}
    if(rangeEnded&&state==OBS_MEDIA_STATE_PLAYING)playNative(source,true);
-   mutePreview=preparing||rangeEnded;
+   mutePreview=preparing||rangeEnded||ended;
    armed=false;
   } else {
-   programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;
+   programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;
    if(!enabled||!wasShowing||wasActive||changed||appliedRevision!=revision||(!armed&&!preparing)||state==OBS_MEDIA_STATE_ENDED||state==OBS_MEDIA_STATE_STOPPED) {
-    prepare(source,state,inMs);
+    prepare(source,state,inMs,changed);
    } else if(!preparing&&(state==OBS_MEDIA_STATE_PLAYING||std::abs(obs_source_media_get_time(source)-cueIn)>80)) {
     prepare(source,state,inMs);
    }
@@ -384,7 +438,8 @@ struct Control {
   if(preparing)return "In 지점 준비 중 — 키프레임부터 무음으로 준비합니다.";
   if(idlePhase)return "화면 밖 미디어 디코더 정리 중 — 무음";
   if(unloaded)return "5초 미사용 — 디코더 메모리 해제 / 프리뷰 진입 시 다시 준비";
-  if(rangeEnded)return "Out 도달 — 정지 / 무음";
+  if(rangeEnded)return "Out 도달 — 마지막 프레임 / 무음 · Play: In부터 다시 재생";
+  if(ended)return "재생 완료 — 마지막 프레임 / 무음 · Play: 처음 또는 In부터 다시 재생";
   if(offStopped)return "프로그램·프리뷰 이탈 — 정지 / 무음";
   return wasActive?"프로그램 재생 중":"프리뷰 대기 — 선택한 In 지점 정지";
  }
@@ -401,11 +456,12 @@ obs_properties_t *properties(void *data) {
  obs_properties_add_button2(p,"reset_range","구간 초기화 (전체 영상)",[](obs_properties_t*,obs_property_t*,void *d){if(!d)return false;auto *c=static_cast<Control*>(d);auto *s=obs_source_get_settings(c->self);obs_data_set_double(s,"in_seconds",0);obs_data_set_double(s,"out_seconds",0);obs_source_update(c->self,s);obs_data_release(s);return true;},data);
  auto status=data?static_cast<Control*>(data)->status():std::string("In 0 / Out 0: 전체 영상");obs_properties_add_text(p,"status",status.c_str(),OBS_TEXT_INFO);
  obs_properties_add_button2(p,"refresh","상태 새로고침",[](obs_properties_t*,obs_property_t*,void*){return true;},data);
- obs_properties_add_text(p,"usage","기본 미디어 소스 전용 · MP4 / MOV / WebM\n프리뷰: In 지점 정지 / 전환 시작: 재생 / Out: 정지\n프로그램 Stop: 첫 프레임 / In 스틸·무음 대기\nPlay: 대기 지점부터 재생 / Pause: 현재 위치 유지\n두 화면 이탈: 즉시 정지·무음 / 5초 뒤 디코더 해제\n프리뷰 재진입: 첫 프레임 또는 In 지점 무음 준비\n프로그램 공유·전환 중인 미디어는 유지합니다.\n구간 변경은 다음 준비·프로그램 진입에 적용합니다.\n필터를 끄거나 제거하면 원래 미디어 설정을 복구합니다.",OBS_TEXT_INFO);
+ obs_properties_add_text(p,"usage","기본 미디어 소스 전용 · MP4 / MOV / WebM\n프리뷰: In 지점 정지 / 전환 시작: 재생 / Out: 정지\n프로그램 Stop: 첫 프레임 / In 스틸·무음 대기\nPlay: 대기 지점부터 재생 / 완료 후 Play: 처음·In부터 재생 / Pause: 현재 위치 유지\n두 화면 이탈: 즉시 정지·무음 / 5초 뒤 디코더 해제\n프리뷰 재진입: 첫 프레임 또는 In 지점 무음 준비\n프로그램 공유·전환 중인 미디어는 유지합니다.\n구간 변경은 다음 준비·프로그램 진입에 적용합니다.\n필터를 끄거나 제거하면 원래 미디어 설정을 복구합니다.",OBS_TEXT_INFO);
  return p;
 }
 }
 bool obs_module_load() {
+ visibility.connect(true);
  obs_source_info info={};info.id="sunjoo_media_cue_control";info.type=OBS_SOURCE_TYPE_FILTER;
  info.output_flags=OBS_SOURCE_ASYNC_VIDEO|OBS_SOURCE_AUDIO;
  info.get_name=name;
@@ -436,4 +492,4 @@ bool obs_module_load() {
  info.get_properties=properties;obs_register_source(&info);
  blog(LOG_INFO,"[Sunjoo Media Cue Control] SunjooAn " FILTER_VERSION " / OBS " FILTER_OBS_MAJOR);return true;
 }
-void obs_module_unload(){cue_editor_shutdown();}
+void obs_module_unload(){visibility.connect(false);cue_editor_shutdown();}

@@ -1,7 +1,7 @@
 param(
  [ValidateSet('32','33')][string]$ObsMajor='33',
  [Parameter(Mandatory=$true)][string]$RuntimeRoot,
- [string[]]$Cases=@('whole-mp4','whole-webm','range-mp4','range-webm','preview-audio-mp4','preview-audio-webm','editor-mp4','editor-webm','editor-fractional','standby-mp4','standby-webm','standby-in-mp4','standby-in-webm')
+ [string[]]$Cases=@('whole-mp4','whole-webm','range-mp4','range-webm','preview-audio-mp4','preview-audio-webm','editor-mp4','editor-webm','editor-fractional','standby-mp4','standby-webm','standby-in-mp4','standby-in-webm','replay-range-mp4','replay-range-webm','replay-eof-mp4','replay-eof-webm','replay-in-eof-mp4','replay-in-eof-webm','reset-mp4','reset-webm')
 )
 $ErrorActionPreference='Stop'
 $cueRoot=Split-Path $PSScriptRoot -Parent
@@ -17,7 +17,7 @@ if($ObsMajor -eq '33'){
  Copy-Item "$cueBuild/Release/sunjoo-media-cue-filter.dll" "$cueRuntime/obs-plugins/64bit/" -Force
  Copy-Item "$cueBuild/Release/filter-frontend-test.dll" "$cueRuntime/obs-plugins/64bit/" -Force
 }
-$cueFlags=@('FILTER_TEST_WEBM','FILTER_TEST_RANGE','FILTER_TEST_PREVIEW_AUDIO','FILTER_TEST_EDITOR','FILTER_TEST_FRACTIONAL','FILTER_TEST_STANDBY','FILTER_TEST_STANDBY_IN')
+$cueFlags=@('FILTER_TEST_WEBM','FILTER_TEST_RANGE','FILTER_TEST_PREVIEW_AUDIO','FILTER_TEST_EDITOR','FILTER_TEST_FRACTIONAL','FILTER_TEST_STANDBY','FILTER_TEST_STANDBY_IN','FILTER_TEST_REPLAY','FILTER_TEST_EOF','FILTER_TEST_REPLAY_IN','FILTER_TEST_RESET')
 $cuePrevious=@{};foreach($cueFlag in $cueFlags){$cuePrevious[$cueFlag]=[Environment]::GetEnvironmentVariable($cueFlag,'Process')}
 try{
  foreach($cueCase in $Cases){
@@ -27,6 +27,10 @@ try{
   if($cueCase -like 'preview-audio-*'){$env:FILTER_TEST_PREVIEW_AUDIO='1'}
   if($cueCase -like 'editor-*'){$env:FILTER_TEST_EDITOR='1'}
   if($cueCase -like '*fractional'){$env:FILTER_TEST_FRACTIONAL='1'}
+    if($cueCase -like 'replay-*'){$env:FILTER_TEST_REPLAY='1'}
+  if($cueCase -like '*eof-*'){$env:FILTER_TEST_EOF='1'}
+  if($cueCase -like 'replay-in-*'){$env:FILTER_TEST_REPLAY_IN='1'}
+  if($cueCase -like 'reset-*'){$env:FILTER_TEST_RESET='1'}
   if($cueCase -like 'standby-*'){$env:FILTER_TEST_STANDBY='1'}
   if($cueCase -like 'standby-in-*'){$env:FILTER_TEST_STANDBY_IN='1'}
   $cueProcess=Start-Process -FilePath "$cueRuntime/bin/64bit/obs64.exe" -ArgumentList '--portable','--multi','--disable-updater','--disable-shutdown-check','--minimize-to-tray' -WorkingDirectory "$cueRuntime/bin/64bit" -WindowStyle Hidden -PassThru

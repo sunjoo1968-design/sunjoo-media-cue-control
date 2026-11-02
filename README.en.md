@@ -1,4 +1,4 @@
-# Sunjoo Media Cue Control 0.7.0
+# Sunjoo Media Cue Control 0.8.0
 
 [한국어](README.md) · Author: **SunjooAn** · Windows x64 · GPL-2.0-or-later
 
@@ -6,7 +6,9 @@ An OBS Studio filter for the built-in **Media Source**. Drag a local video into 
 
 - Studio preview: hold the first frame, or the configured In point, silently.
 - Program entry: start playback when the transition begins.
-- Out point: pause the picture and mute audio.
+- Out or EOF: hold the final picture silently. Play starts a new pass from the beginning/In. Ordinary Pause resumes in place.
+- Resetting a nonzero In to the whole range restores the first-frame poster.
+- Visibility traversal is shared per video frame; equivalent in-flight cue requests are coalesced. The five-second decoder policy is unchanged.
 - Program Stop: hold the first/In frame silently until explicit Play. Pause keeps the current position. A new preview-to-program transition still auto plays.
 - Leaving both program and preview: stop video/audio immediately, then close the native decoder after five continuously unused seconds.
 - Sources shared with program keep playing. Visible sources in a scene are controlled individually; hidden items and hidden parent groups are excluded.
@@ -20,8 +22,8 @@ Download the ZIP matching your OBS version from [Releases](https://github.com/su
 
 | Package | Tested target |
 |---|---|
-| `OBS32-SunjooMediaCueControl-0.7.0-Windows-x64.zip` | OBS Studio 32.2.2, Windows x64 |
-| `OBS33-SunjooMediaCueControl-0.7.0-Windows-x64.zip` | OBS Studio 33.0.0, Windows x64 |
+| `OBS32-SunjooMediaCueControl-0.8.0-Windows-x64.zip` | OBS Studio 32.2.2, Windows x64 |
+| `OBS33-SunjooMediaCueControl-0.8.0-Windows-x64.zip` | OBS Studio 33.0.0, Windows x64 |
 
 1. Close OBS and extract the complete ZIP.
 2. Run `Install-SunjooMediaCueControl.cmd` as administrator.
@@ -43,7 +45,7 @@ The waveform uses the maximum absolute amplitude across channels, preserving opp
 
 ## Validation and limitations
 
-The 0.7.0 binaries passed **802 checks** across OBS 32.2.2 and 33.0.0. Tests used real libobs, D3D11, native media sources, CUT/fade transitions and Qt editor windows. The practical load test used 64 filtered media sources with four 1080p videos playing and local 1080p60 H.264/AAC recording. See [validation](VALIDATION.md), [structured results](validation-summary.json) and [broadcast review](BROADCAST-REVIEW.md).
+The 0.8.0 binaries passed **1046 checks** across OBS 32.2.2 and 33.0.0. Tests used real libobs, D3D11, native media sources, CUT/fade transitions and Qt editor windows. The practical load test used 64 filtered media sources with four 1080p videos playing and local 1080p60 H.264/AAC recording. See [validation](VALIDATION.md), [structured results](validation-summary.json) and [broadcast review](BROADCAST-REVIEW.md).
 
 Unused decoder file handles and poster caches are released through the native source update path. Shared, preview and transitioning sources remain loaded. Re-entering preview silently prepares the first/In frame. Preparation and decoder destruction take time; requests are staggered, and Windows/FFmpeg/GPU allocators may retain reusable memory. Four-HD playback/cleanup recording and a rapid 64-source switching test are reported separately in [validation](VALIDATION.md). The rapid test still has rendering lag, so these results do not guarantee zero broadcast impact on every PC, codec or scene collection.
 

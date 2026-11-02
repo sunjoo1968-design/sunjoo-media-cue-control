@@ -2,14 +2,14 @@
 $ErrorActionPreference='Stop'
 $cueRoot=Split-Path $PSScriptRoot -Parent
 $cueWorkspace=Split-Path $cueRoot -Parent
-$cueVersion='0.7.0'
+$cueVersion='0.8.0'
 $cueRelease=Join-Path $cueRoot "release-$cueVersion"
 $cueDist=Join-Path $cueWorkspace 'dist'
-$cueCases=@{'whole-mp4'=14;'whole-webm'=14;'range-mp4'=7;'range-webm'=7;'preview-audio-mp4'=8;'preview-audio-webm'=8;'editor-mp4'=36;'editor-webm'=36;'editor-fractional'=36;'standby-mp4'=13;'standby-webm'=13;'standby-in-mp4'=13;'standby-in-webm'=13}
+$cueCases=@{'whole-mp4'=14;'whole-webm'=14;'range-mp4'=7;'range-webm'=7;'preview-audio-mp4'=8;'preview-audio-webm'=8;'editor-mp4'=36;'editor-webm'=36;'editor-fractional'=36;'standby-mp4'=13;'standby-webm'=13;'standby-in-mp4'=13;'standby-in-webm'=13;'replay-range-mp4'=11;'replay-range-webm'=11;'replay-eof-mp4'=11;'replay-eof-webm'=11;'replay-in-eof-mp4'=11;'replay-in-eof-webm'=11;'reset-mp4'=10;'reset-webm'=10}
 $cueSummary=[ordered]@{version=$cueVersion;author='SunjooAn';date='2026-11-02';scope='Program Stop/Play standby; 64 filters, 4 simultaneous 1080p sources, local 1080p60 recording';targets=@();total_checks=0;limitations='See BROADCAST-REVIEW.md, including native cue/decoder cleanup latency and OS/driver allocator retention.'}
 foreach($cueMajor in @('32','33')){
  $cueCounts=[ordered]@{}
- foreach($cueTest in @(@('integration',64),@('preview',17),@('waveform',18),@('stress',13),@('idle',24),@('steady',15),@('standby',32))){
+ foreach($cueTest in @(@('integration',64),@('preview',17),@('waveform',18),@('stress',14),@('idle',26),@('steady',16),@('standby',32),@('replay',32))){
   $cueName=$cueTest[0];$cueExpected=[int]$cueTest[1];$cueSuffix=if($cueName -eq 'stress'){'-practical'}else{''}
   $cueLog=Get-Content "$cueRoot/tests/$cueName$cueMajor$cueSuffix.log" -Raw
   if($cueLog -notmatch "COMPLETE passes=$cueExpected failures=0" -or $cueLog -match '(?m)^FAIL:'){throw "Invalid $cueName $cueMajor result"}
@@ -24,6 +24,7 @@ foreach($cueMajor in @('32','33')){
   $cueCounts[$cueCase]=$cuePasses
  }
  $cueDll=Get-Item "$cueRoot/build$cueMajor/Release/sunjoo-media-cue-filter.dll"
+ if([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($cueDll.FullName)).Contains('[DEBUG-')){throw 'Diagnostic instrumentation found in production DLL'}
  if($cueDll.VersionInfo.FileVersion -ne $cueVersion -or $cueDll.VersionInfo.CompanyName -ne 'SunjooAn'){throw 'DLL version/creator mismatch'}
  $cueRecord=Get-Content "$cueRoot/tests/recording$cueMajor.json" -Raw | ConvertFrom-Json
  if(!$cueRecord.streams.Where({$_.codec_name -eq 'h264' -and $_.width -eq 1920 -and $_.height -eq 1080 -and $_.avg_frame_rate -eq '60/1' -and [int]$_.nb_read_frames -gt 300}) -or !$cueRecord.streams.Where({$_.codec_name -eq 'aac'})){throw 'Recording content validation missing'}
@@ -58,11 +59,11 @@ $cueSources=Join-Path $cueRelease 'source/media-cue-filter'
 New-Item -ItemType Directory -Force "$cueSources/tests" | Out-Null
 foreach($cueDir in @('src','scripts','docs')){Copy-Item "$cueRoot/$cueDir" $cueSources -Recurse -Force}
 foreach($cueDoc in $cueDocuments+@('CMakeLists.txt')){Copy-Item "$cueRoot/$cueDoc" $cueSources -Force}
-foreach($cueTest in @('integration.cpp','preview.cpp','waveform.cpp','frontend.cpp','stress.cpp','idle.cpp','standby.cpp','Generate-Fixtures.ps1','Run-Frontend.ps1','Run-Stress.ps1')){Copy-Item "$cueRoot/tests/$cueTest" "$cueSources/tests" -Force}
+foreach($cueTest in @('integration.cpp','preview.cpp','waveform.cpp','frontend.cpp','stress.cpp','idle.cpp','standby.cpp','replay.cpp','Generate-Fixtures.ps1','Run-Frontend.ps1','Run-Stress.ps1')){Copy-Item "$cueRoot/tests/$cueTest" "$cueSources/tests" -Force}
 $cueSourceZip=Join-Path $cueDist "SunjooMediaCueControl-$cueVersion-Sources.zip"
 Compress-Archive (Join-Path $cueRelease 'source/*') $cueSourceZip -Force
 $cueZips+=$cueSourceZip
-foreach($cueZip in $cueZips){$cueArchive=[IO.Compression.ZipFile]::OpenRead($cueZip);try{if($cueArchive.Entries.FullName -match '(filter-tests\.exe|preview-tests\.exe|waveform-tests\.exe|stress-tests\.exe|idle-tests\.exe|standby-tests\.exe|filter-frontend-test\.dll|obs64\.exe|obs-ffmpeg-mux\.exe|\.log$|\.mkv$)'){throw 'Test/runtime artifact found in release'};if($cueZip -like '*Windows-x64.zip' -and @($cueArchive.Entries.FullName | Where-Object {$_ -like '*.dll'}).Count -ne 1){throw 'Unexpected DLL count'}}finally{$cueArchive.Dispose()}}
+foreach($cueZip in $cueZips){$cueArchive=[IO.Compression.ZipFile]::OpenRead($cueZip);try{if($cueArchive.Entries.FullName -match '(filter-tests\.exe|preview-tests\.exe|waveform-tests\.exe|stress-tests\.exe|idle-tests\.exe|standby-tests\.exe|replay-tests\.exe|filter-frontend-test\.dll|obs64\.exe|obs-ffmpeg-mux\.exe|\.log$|\.mkv$)'){throw 'Test/runtime artifact found in release'};if($cueZip -like '*Windows-x64.zip' -and @($cueArchive.Entries.FullName | Where-Object {$_ -like '*.dll'}).Count -ne 1){throw 'Unexpected DLL count'}}finally{$cueArchive.Dispose()}}
 $cueZips | ForEach-Object {"$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $(Split-Path $_ -Leaf)"} | Set-Content (Join-Path $cueDist "SunjooMediaCueControl-$cueVersion-SHA256SUMS.txt") -Encoding ascii
 Write-Output "Packaged ${cueVersion}: $($cueSummary.total_checks) verified checks."
 Get-Item $cueZips | Select-Object Name,Length

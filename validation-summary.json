@@ -1,44 +1,21 @@
 {
-  "version": "0.7.0",
+  "version": "0.8.0",
   "author": "SunjooAn",
   "date": "2026-11-02",
   "scope": "Program Stop/Play standby; 64 filters, 4 simultaneous 1080p sources, local 1080p60 recording",
   "targets": [
     {
-      "obs_major": "32",
-      "total": 401.0,
-      "checks": {
-        "integration": 64,
-        "preview": 17,
-        "waveform": 18,
-        "stress": 13,
-        "idle": 24,
-        "steady": 15,
-        "standby": 32,
-        "whole-webm": 14,
-        "preview-audio-mp4": 8,
-        "range-mp4": 7,
-        "editor-webm": 36,
-        "range-webm": 7,
-        "whole-mp4": 14,
-        "standby-in-webm": 13,
-        "standby-webm": 13,
-        "editor-mp4": 36,
-        "editor-fractional": 36,
-        "standby-mp4": 13,
-        "preview-audio-webm": 8,
-        "standby-in-mp4": 13
-      },
-      "steady_metrics": [
-        "METRIC steady-live4-unload4 cpu_one_core_percent=71.871 private_MiB=1274.684 frame_ms=1.509 frames=420 lagged=0 elapsed_s=7.000",
-        "METRIC steady-live4-unload4 cpu_one_core_percent=73.210 private_MiB=1292.590 frame_ms=0.994 frames=420 lagged=0 elapsed_s=7.000"
-      ],
       "metrics": [
-        "METRIC filtered-hidden-64 cpu_one_core_percent=7.028 private_MiB=166.066 frame_ms=0.146 frames=120 lagged=0 elapsed_s=2.001",
-        "METRIC filtered-preview-4 cpu_one_core_percent=24.988 private_MiB=1123.664 frame_ms=0.475 frames=120 lagged=0 elapsed_s=2.001",
-        "METRIC filtered-live-4 cpu_one_core_percent=76.029 private_MiB=1202.266 frame_ms=0.822 frames=180 lagged=0 elapsed_s=3.000",
-        "METRIC filtered-after-cuts-live-4 cpu_one_core_percent=83.592 private_MiB=5162.168 frame_ms=5.105 frames=240 lagged=3 elapsed_s=4.000",
-        "METRIC filtered-after-idle-release-live-4 cpu_one_core_percent=76.558 private_MiB=2177.422 frame_ms=0.957 frames=180 lagged=0 elapsed_s=3.000"
+        "METRIC filtered-hidden-64 cpu_one_core_percent=7.810 private_MiB=164.352 frame_ms=0.111 frames=120 lagged=0 elapsed_s=2.001",
+        "METRIC filtered-preview-4 cpu_one_core_percent=27.340 private_MiB=1104.504 frame_ms=0.365 frames=120 lagged=0 elapsed_s=2.000",
+        "METRIC filtered-live-4 cpu_one_core_percent=70.305 private_MiB=1193.023 frame_ms=0.806 frames=180 lagged=0 elapsed_s=3.000",
+        "METRIC filtered-after-cuts-live-4 cpu_one_core_percent=104.295 private_MiB=4840.363 frame_ms=6.952 frames=240 lagged=6 elapsed_s=4.000",
+        "METRIC filtered-after-idle-release-live-4 cpu_one_core_percent=68.727 private_MiB=2167.598 frame_ms=0.765 frames=181 lagged=0 elapsed_s=3.001",
+        "METRIC controller visibility_queries=7552 scene_scans=2134 prepare_requests=338 prepares=324 coalesced=14"
+      ],
+      "steady_metrics": [
+        "METRIC steady-live4-unload4 cpu_one_core_percent=66.513 private_MiB=1279.734 frame_ms=0.765 frames=420 lagged=0 elapsed_s=7.001",
+        "METRIC steady-live4-unload4 cpu_one_core_percent=75.214 private_MiB=1292.262 frame_ms=1.458 frames=420 lagged=0 elapsed_s=7.001"
       ],
       "recording": [
         {
@@ -74,7 +51,7 @@
           "start_pts": 0,
           "start_time": "0.000000",
           "bits_per_raw_sample": "8",
-          "nb_read_frames": "1792",
+          "nb_read_frames": "1787",
           "extradata_size": 43,
           "disposition": {
             "default": 0,
@@ -98,7 +75,7 @@
             "multilayer": 0
           },
           "tags": {
-            "DURATION": "00:00:29.867000000"
+            "DURATION": "00:00:29.784000000"
           }
         },
         {
@@ -121,7 +98,7 @@
           "time_base": "1/1000",
           "start_pts": 0,
           "start_time": "0.000000",
-          "nb_read_frames": "1400",
+          "nb_read_frames": "1396",
           "extradata_size": 5,
           "disposition": {
             "default": 0,
@@ -146,47 +123,57 @@
           },
           "tags": {
             "title": "Stress AAC",
-            "DURATION": "00:00:29.887000000"
+            "DURATION": "00:00:29.802000000"
           }
         }
       ],
-      "dll_sha256": "F40C69326FBAB3D47594746310326C4C7F7F78FF7F47D48804BA7547956AA652"
+      "total": 523.0,
+      "obs_major": "32",
+      "checks": {
+        "integration": 64,
+        "preview": 17,
+        "waveform": 18,
+        "stress": 14,
+        "idle": 26,
+        "steady": 16,
+        "standby": 32,
+        "replay": 32,
+        "standby-webm": 13,
+        "preview-audio-webm": 8,
+        "standby-mp4": 13,
+        "replay-in-eof-mp4": 11,
+        "whole-mp4": 14,
+        "range-mp4": 7,
+        "range-webm": 7,
+        "standby-in-webm": 13,
+        "reset-webm": 10,
+        "replay-eof-webm": 11,
+        "editor-mp4": 36,
+        "replay-in-eof-webm": 11,
+        "replay-eof-mp4": 11,
+        "replay-range-webm": 11,
+        "preview-audio-mp4": 8,
+        "whole-webm": 14,
+        "replay-range-mp4": 11,
+        "reset-mp4": 10,
+        "editor-fractional": 36,
+        "editor-webm": 36,
+        "standby-in-mp4": 13
+      },
+      "dll_sha256": "24D78A1AAA4F78BA6680D0726982BE85C44F25EE455DABB2315376ADC3E6A9DB"
     },
     {
-      "obs_major": "33",
-      "total": 401.0,
-      "checks": {
-        "integration": 64,
-        "preview": 17,
-        "waveform": 18,
-        "stress": 13,
-        "idle": 24,
-        "steady": 15,
-        "standby": 32,
-        "whole-webm": 14,
-        "preview-audio-mp4": 8,
-        "range-mp4": 7,
-        "editor-webm": 36,
-        "range-webm": 7,
-        "whole-mp4": 14,
-        "standby-in-webm": 13,
-        "standby-webm": 13,
-        "editor-mp4": 36,
-        "editor-fractional": 36,
-        "standby-mp4": 13,
-        "preview-audio-webm": 8,
-        "standby-in-mp4": 13
-      },
-      "steady_metrics": [
-        "METRIC steady-live4-unload4 cpu_one_core_percent=77.895 private_MiB=1273.719 frame_ms=1.554 frames=420 lagged=0 elapsed_s=7.001",
-        "METRIC steady-live4-unload4 cpu_one_core_percent=82.578 private_MiB=1289.941 frame_ms=1.006 frames=420 lagged=0 elapsed_s=7.001"
-      ],
       "metrics": [
-        "METRIC filtered-hidden-64 cpu_one_core_percent=5.466 private_MiB=166.453 frame_ms=0.132 frames=120 lagged=0 elapsed_s=2.001",
-        "METRIC filtered-preview-4 cpu_one_core_percent=23.430 private_MiB=1125.996 frame_ms=0.424 frames=120 lagged=0 elapsed_s=2.001",
-        "METRIC filtered-live-4 cpu_one_core_percent=73.939 private_MiB=1204.672 frame_ms=0.896 frames=180 lagged=0 elapsed_s=3.001",
-        "METRIC filtered-after-cuts-live-4 cpu_one_core_percent=78.514 private_MiB=4990.277 frame_ms=4.040 frames=240 lagged=4 elapsed_s=4.000",
-        "METRIC filtered-after-idle-release-live-4 cpu_one_core_percent=70.309 private_MiB=2164.598 frame_ms=0.980 frames=181 lagged=0 elapsed_s=3.000"
+        "METRIC filtered-hidden-64 cpu_one_core_percent=5.467 private_MiB=166.129 frame_ms=0.128 frames=120 lagged=0 elapsed_s=2.001",
+        "METRIC filtered-preview-4 cpu_one_core_percent=27.336 private_MiB=1119.938 frame_ms=0.475 frames=120 lagged=0 elapsed_s=2.001",
+        "METRIC filtered-live-4 cpu_one_core_percent=64.056 private_MiB=1199.309 frame_ms=0.899 frames=180 lagged=0 elapsed_s=3.000",
+        "METRIC filtered-after-cuts-live-4 cpu_one_core_percent=85.153 private_MiB=5014.105 frame_ms=5.248 frames=240 lagged=7 elapsed_s=4.000",
+        "METRIC filtered-after-idle-release-live-4 cpu_one_core_percent=77.590 private_MiB=2173.465 frame_ms=1.183 frames=181 lagged=0 elapsed_s=3.001",
+        "METRIC controller visibility_queries=7500 scene_scans=2121 prepare_requests=336 prepares=324 coalesced=12"
+      ],
+      "steady_metrics": [
+        "METRIC steady-live4-unload4 cpu_one_core_percent=73.657 private_MiB=1295.152 frame_ms=0.822 frames=420 lagged=0 elapsed_s=7.000",
+        "METRIC steady-live4-unload4 cpu_one_core_percent=70.969 private_MiB=1294.590 frame_ms=1.490 frames=421 lagged=0 elapsed_s=7.001"
       ],
       "recording": [
         {
@@ -222,7 +209,7 @@
           "start_pts": 0,
           "start_time": "0.000000",
           "bits_per_raw_sample": "8",
-          "nb_read_frames": "1786",
+          "nb_read_frames": "1798",
           "extradata_size": 43,
           "disposition": {
             "default": 0,
@@ -246,7 +233,7 @@
             "multilayer": 0
           },
           "tags": {
-            "DURATION": "00:00:29.767000000"
+            "DURATION": "00:00:29.967000000"
           }
         },
         {
@@ -269,7 +256,7 @@
           "time_base": "1/1000",
           "start_pts": 0,
           "start_time": "0.000000",
-          "nb_read_frames": "1395",
+          "nb_read_frames": "1405",
           "extradata_size": 5,
           "disposition": {
             "default": 0,
@@ -294,13 +281,46 @@
           },
           "tags": {
             "title": "Stress AAC",
-            "DURATION": "00:00:29.781000000"
+            "DURATION": "00:00:29.994000000"
           }
         }
       ],
-      "dll_sha256": "5A1579BC370598141C7CF5EEA21FACCD191E006513732DD9C3A16FEA72D6EDC8"
+      "total": 523.0,
+      "obs_major": "33",
+      "checks": {
+        "integration": 64,
+        "preview": 17,
+        "waveform": 18,
+        "stress": 14,
+        "idle": 26,
+        "steady": 16,
+        "standby": 32,
+        "replay": 32,
+        "standby-webm": 13,
+        "preview-audio-webm": 8,
+        "standby-mp4": 13,
+        "replay-in-eof-mp4": 11,
+        "whole-mp4": 14,
+        "range-mp4": 7,
+        "range-webm": 7,
+        "standby-in-webm": 13,
+        "reset-webm": 10,
+        "replay-eof-webm": 11,
+        "editor-mp4": 36,
+        "replay-in-eof-webm": 11,
+        "replay-eof-mp4": 11,
+        "replay-range-webm": 11,
+        "preview-audio-mp4": 8,
+        "whole-webm": 14,
+        "replay-range-mp4": 11,
+        "reset-mp4": 10,
+        "editor-fractional": 36,
+        "editor-webm": 36,
+        "standby-in-mp4": 13
+      },
+      "dll_sha256": "8042B8CFB71F9E6FBA48C369A9924B50408C3F7FBB58D3112A5FC08AC86CFA9E"
     }
   ],
-  "total_checks": 802.0,
+  "total_checks": 1046.0,
   "limitations": "See BROADCAST-REVIEW.md, including native cue/decoder cleanup latency and OS/driver allocator retention."
 }

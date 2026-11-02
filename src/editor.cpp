@@ -205,4 +205,3 @@ void cue_editor_open(obs_source_t *filter,const char *parentUuid,const char *loc
  },Qt::QueuedConnection);
 }
 void cue_editor_shutdown(){if(!qApp)return;auto close=[] {delete editorDispatcher.data();editorDispatcher=nullptr;for(auto &editor:editors)if(editor)delete editor.data();editors.clear();};if(QThread::currentThread()==qApp->thread())close();else QMetaObject::invokeMethod(qApp,close,Qt::BlockingQueuedConnection);}
-

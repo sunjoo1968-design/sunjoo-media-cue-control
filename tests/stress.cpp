@@ -6,6 +6,12 @@
 #include <Psapi.h>
 static uint64_t cpuTime(){FILETIME created,exited,kernel,user;GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user);ULARGE_INTEGER a,b;a.LowPart=kernel.dwLowDateTime;a.HighPart=kernel.dwHighDateTime;b.LowPart=user.dwLowDateTime;b.HighPart=user.dwHighDateTime;return a.QuadPart+b.QuadPart;}
 static void measure(const char *label,int ms){auto cpu=cpuTime();auto start=os_gettime_ns();auto frames=obs_get_total_frames(),lag=obs_get_lagged_frames();std::this_thread::sleep_for(std::chrono::milliseconds(ms));PROCESS_MEMORY_COUNTERS_EX mem={};GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&mem),sizeof(mem));double seconds=double(os_gettime_ns()-start)/1e9;printf("METRIC %s cpu_one_core_percent=%.3f private_MiB=%.3f frame_ms=%.3f frames=%u lagged=%u elapsed_s=%.3f\n",label,double(cpuTime()-cpu)/1e7/seconds*100,mem.PrivateUsage/1048576.0,obs_get_average_frame_time_ns()/1e6,obs_get_total_frames()-frames,obs_get_lagged_frames()-lag,seconds);}
+static void controllerMetrics(const std::vector<Clip> &clips){
+ int64_t queries=0,scans=0,requests=0,starts=0,merged=0;
+ for(const auto &clip:clips){calldata_t data;calldata_init(&data);bool ok=proc_handler_call(obs_source_get_proc_handler(clip.filter),"cue_metrics",&data);if(!ok){calldata_free(&data);return;}queries=calldata_int(&data,"visibility_queries");scans=calldata_int(&data,"visibility_scans");requests+=calldata_int(&data,"prepare_requests");starts+=calldata_int(&data,"prepares");merged+=calldata_int(&data,"coalesced");calldata_free(&data);}
+ printf("METRIC controller visibility_queries=%lld scene_scans=%lld prepare_requests=%lld prepares=%lld coalesced=%lld\n",(long long)queries,(long long)scans,(long long)requests,(long long)starts,(long long)merged);
+ check(scans>0&&scans<queries,"Visible scene traversals are shared across simultaneously live media");
+}
 int main(int argc,char **argv){
  if(argc<4)return 2;setvbuf(stdout,nullptr,_IONBF,0);auto runtime=std::filesystem::absolute(argv[1]),plugin=std::filesystem::absolute(argv[2]),fixtures=std::filesystem::absolute(argv[3]);bool baseline=false,record=false,hd=false,practical=false,steady=false;for(int i=4;i<argc;++i){baseline|=strcmp(argv[i],"native")==0;record|=strcmp(argv[i],"record")==0;hd|=strcmp(argv[i],"hd")==0;practical|=strcmp(argv[i],"practical")==0;steady|=strcmp(argv[i],"steady")==0;}int groupSize=practical?4:8;
  std::filesystem::current_path(runtime/"bin/64bit");SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);AddDllDirectory((runtime/L"bin/64bit").c_str());if(!obs_startup("en-US",nullptr,nullptr))return 2;
@@ -37,6 +43,7 @@ int main(int argc,char **argv){
    check(obs_get_lagged_frames()==lag,"Steady four-live/four-idle cleanup has zero OBS rendering-lag frames");
   }
   if(output){check(obs_output_active(output)&&obs_encoder_get_encoded_frames(venc)>600,"1080p60 recording remains active across two unload/reopen cycles");obs_output_stop(output);check(until([&]{return !obs_output_active(output);},10000),"Steady recording finishes cleanly");obs_output_release(output);obs_encoder_release(venc);obs_encoder_release(aenc);}
+  if(!baseline)controllerMetrics(clips);
   obs_source_remove_audio_capture_callback(clips[0].source,audio,nullptr);obs_set_output_source(0,nullptr);obs_source_release(cut);for(auto &c:clips){obs_source_release(c.filter);obs_source_release(c.source);}for(auto *scene:scenes){obs_canvas_scene_remove(scene);obs_scene_release(scene);}obs_canvas_scene_remove(blank);obs_scene_release(blank);obs_wait_for_destroy_queue();obs_shutdown();check(bnum_allocs()==0,"Steady scenario releases all OBS tracked allocations");printf("COMPLETE passes=%d failures=%d\n",passes,fails);return fails?1:0;
  }
  for(int i=0;i<80;++i){obs_transition_set(cut,obs_scene_get_source(scenes[i%scenes.size()]));std::this_thread::sleep_for(std::chrono::milliseconds(practical?150:65));}
@@ -53,6 +60,7 @@ int main(int argc,char **argv){
   check(audioSamples>audioBeforeCleanup+1000&&pictureAfterCleanup!=pictureBeforeCleanup,"Program GPU video and non-silent audio continue throughout native decoder cleanup");
  }
  if(output){printf("RECORD encoded=%u output_frames=%d dropped=%d error=%s\n",obs_encoder_get_encoded_frames(venc),obs_output_get_total_frames(output),obs_output_get_frames_dropped(output),obs_output_get_last_error(output));check(obs_output_active(output)&&obs_encoder_get_encoded_frames(venc)>300,"Recording continues through scene switching with all filters attached");obs_output_stop(output);check(until([&]{return !obs_output_active(output);},10000),"Recording finishes cleanly");obs_output_release(output);obs_encoder_release(venc);obs_encoder_release(aenc);}
+ if(!baseline)controllerMetrics(clips);
  // Destroy half of the filters during active media/audio callbacks, then the rest
  // on shutdown. OBS tracked allocations catch retained source references.
  for(int i=0;i<32;++i)if(clips[i].filter){obs_source_filter_remove(clips[i].source,clips[i].filter);obs_source_release(clips[i].filter);clips[i].filter=nullptr;}sleep(200);if(!baseline)check(true,"32 active filters removed while decoder callbacks run");

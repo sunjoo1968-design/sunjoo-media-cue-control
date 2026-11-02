@@ -14,6 +14,8 @@ if($LASTEXITCODE){throw 'VP9 WebM fixture failed'}
 if($LASTEXITCODE){throw 'VP8 WebM fixture failed'}
 & $FFmpeg -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=320x180:rate=30:duration=12' -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=12' -c:v libx264 -g 300 -preset ultrafast -pix_fmt yuv420p -c:a aac -shortest "$cueFixtures/editor-test.mp4"
 if($LASTEXITCODE){throw 'Long-GOP editor MP4 fixture failed'}
+& $FFmpeg -hide_banner -loglevel error -y -i "$cueFixtures/editor-test.mp4" -frames:v 6 -pix_fmt rgba -f rawvideo "$cueFixtures/editor-first-six.rgba"
+if($LASTEXITCODE){throw 'Idle first-frame reference failed'}
 & $FFmpeg -hide_banner -loglevel error -y -i "$cueFixtures/editor-test.mp4" -c:v libvpx-vp9 -g 300 -b:v 400k -c:a libopus "$cueFixtures/editor-test.webm"
 if($LASTEXITCODE){throw 'Editor WebM fixture failed'}
 & $FFmpeg -hide_banner -loglevel error -y -ss 6 -i "$cueFixtures/editor-test.mp4" -frames:v 1 -pix_fmt rgba -f rawvideo "$cueFixtures/editor-6s.rgba"

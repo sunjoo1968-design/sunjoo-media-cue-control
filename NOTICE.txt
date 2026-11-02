@@ -1,4 +1,4 @@
-Sunjoo Media Cue Control 0.7.0
+Sunjoo Media Cue Control 0.8.0
 Copyright (C) 2026 SunjooAn
 SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -9,5 +9,3 @@ FFmpeg: https://ffmpeg.org/
 Qt: https://www.qt.io/ / https://www.qt.io/licensing/open-source-lgpl-obligations
 OBS, FFmpeg and Qt retain their original copyrights and licenses.
 No OBS/FFmpeg/Qt runtime DLLs, SDKs or test modules are included in the binary packages.
-
-

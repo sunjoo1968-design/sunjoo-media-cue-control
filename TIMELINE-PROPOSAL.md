@@ -23,4 +23,3 @@ OBS 기본 미디어 탐색은 키프레임 영향을 받습니다. 정확한 �
 ## 가능 여부의 근거
 
 OBS는 별도 영상 표시 영역을 위한 [Display API](https://docs.obsproject.com/frontends)를 제공하며, OBS의 Qt UI에서 [슬라이더 드래그](https://doc.qt.io/qt-6/qslider.html)와 [별도 대화상자](https://doc.qt.io/qt-6/qdialog.html)를 구성할 수 있습니다. 두 손잡이를 가진 구간 선택과 영상 탐색의 연결은 플러그인에서 구현해야 합니다. 기본 필터 속성의 숫자 항목만으로 완성되는 기능은 아닙니다.
-
