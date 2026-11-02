@@ -1,9 +1,11 @@
 param(
  [ValidateSet('32','33')][string]$ObsMajor='33',
  [Parameter(Mandatory=$true)][string]$RuntimeRoot,
- [switch]$NativeBaseline
+ [switch]$NativeBaseline,
+ [switch]$Steady
 )
 $ErrorActionPreference='Stop'
+if($Steady -and $NativeBaseline){throw 'Steady preview/unload assertions require the filter; run the separate native comparison without -Steady.'}
 $cueRoot=Split-Path $PSScriptRoot -Parent
 $cueWorkspace=[IO.Path]::GetFullPath((Split-Path $cueRoot -Parent)).TrimEnd('\')+'\'
 $cueRuntime=(Resolve-Path -LiteralPath $RuntimeRoot).Path
@@ -17,7 +19,8 @@ try{
  $cueArgs=@($cueRuntime,"$cueBuild/sunjoo-media-cue-filter.dll","$PSScriptRoot/fixtures",'record','hd','practical')
  $cueSuffix=if($NativeBaseline){'-native'}else{''}
  if($NativeBaseline){$cueArgs+='native'}
- $cueLog=Join-Path $PSScriptRoot "stress$ObsMajor-practical$cueSuffix.log"
+ if($Steady){$cueArgs+='steady'}
+ $cueLog=if($Steady){Join-Path $PSScriptRoot "steady$ObsMajor.log"}else{Join-Path $PSScriptRoot "stress$ObsMajor-practical$cueSuffix.log"}
  & "$cueBuild/stress-tests.exe" @cueArgs *> $cueLog
  $cueExit=$LASTEXITCODE
  Select-String -Path $cueLog -Pattern '^METRIC|^RECORD|^FAIL|^COMPLETE|skipped frames|lagged frames'

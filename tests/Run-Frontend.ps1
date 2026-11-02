@@ -1,7 +1,7 @@
 param(
  [ValidateSet('32','33')][string]$ObsMajor='33',
  [Parameter(Mandatory=$true)][string]$RuntimeRoot,
- [string[]]$Cases=@('whole-mp4','whole-webm','range-mp4','range-webm','preview-audio-mp4','editor-mp4','editor-webm','editor-fractional')
+ [string[]]$Cases=@('whole-mp4','whole-webm','range-mp4','range-webm','preview-audio-mp4','preview-audio-webm','editor-mp4','editor-webm','editor-fractional','standby-mp4','standby-webm','standby-in-mp4','standby-in-webm')
 )
 $ErrorActionPreference='Stop'
 $cueRoot=Split-Path $PSScriptRoot -Parent
@@ -17,7 +17,7 @@ if($ObsMajor -eq '33'){
  Copy-Item "$cueBuild/Release/sunjoo-media-cue-filter.dll" "$cueRuntime/obs-plugins/64bit/" -Force
  Copy-Item "$cueBuild/Release/filter-frontend-test.dll" "$cueRuntime/obs-plugins/64bit/" -Force
 }
-$cueFlags=@('FILTER_TEST_WEBM','FILTER_TEST_RANGE','FILTER_TEST_PREVIEW_AUDIO','FILTER_TEST_EDITOR','FILTER_TEST_FRACTIONAL')
+$cueFlags=@('FILTER_TEST_WEBM','FILTER_TEST_RANGE','FILTER_TEST_PREVIEW_AUDIO','FILTER_TEST_EDITOR','FILTER_TEST_FRACTIONAL','FILTER_TEST_STANDBY','FILTER_TEST_STANDBY_IN')
 $cuePrevious=@{};foreach($cueFlag in $cueFlags){$cuePrevious[$cueFlag]=[Environment]::GetEnvironmentVariable($cueFlag,'Process')}
 try{
  foreach($cueCase in $Cases){
@@ -27,7 +27,9 @@ try{
   if($cueCase -like 'preview-audio-*'){$env:FILTER_TEST_PREVIEW_AUDIO='1'}
   if($cueCase -like 'editor-*'){$env:FILTER_TEST_EDITOR='1'}
   if($cueCase -like '*fractional'){$env:FILTER_TEST_FRACTIONAL='1'}
-  $cueProcess=Start-Process -FilePath "$cueRuntime/bin/64bit/obs64.exe" -ArgumentList '--portable','--multi','--disable-shutdown-check','--minimize-to-tray' -WorkingDirectory "$cueRuntime/bin/64bit" -WindowStyle Hidden -PassThru
+  if($cueCase -like 'standby-*'){$env:FILTER_TEST_STANDBY='1'}
+  if($cueCase -like 'standby-in-*'){$env:FILTER_TEST_STANDBY_IN='1'}
+  $cueProcess=Start-Process -FilePath "$cueRuntime/bin/64bit/obs64.exe" -ArgumentList '--portable','--multi','--disable-updater','--disable-shutdown-check','--minimize-to-tray' -WorkingDirectory "$cueRuntime/bin/64bit" -WindowStyle Hidden -PassThru
   if(!$cueProcess.WaitForExit(45000)){$cueProcess.Kill();throw "UI test timeout: $cueCase"}
   $cueLog=Get-ChildItem "$cueRuntime/config/obs-studio/logs" -Filter '*.txt' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
   $cueDestination=Join-Path $PSScriptRoot "frontend$ObsMajor-$cueCase.log";Copy-Item $cueLog.FullName $cueDestination

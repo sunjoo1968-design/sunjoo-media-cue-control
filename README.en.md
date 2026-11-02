@@ -1,4 +1,4 @@
-# Sunjoo Media Cue Control 0.5.0
+# Sunjoo Media Cue Control 0.7.0
 
 [한국어](README.md) · Author: **SunjooAn** · Windows x64 · GPL-2.0-or-later
 
@@ -7,7 +7,8 @@ An OBS Studio filter for the built-in **Media Source**. Drag a local video into 
 - Studio preview: hold the first frame, or the configured In point, silently.
 - Program entry: start playback when the transition begins.
 - Out point: pause the picture and mute audio.
-- Leaving both program and preview: stop video and audio.
+- Program Stop: hold the first/In frame silently until explicit Play. Pause keeps the current position. A new preview-to-program transition still auto plays.
+- Leaving both program and preview: stop video/audio immediately, then close the native decoder after five continuously unused seconds.
 - Sources shared with program keep playing. Visible sources in a scene are controlled individually; hidden items and hidden parent groups are excluded.
 - A separate, silent video editor provides draggable In/Out handles, frame stepping, zoom and pan.
 - Optional video thumbnails and audio waveforms are **both hidden by default**. Enable each checkbox as needed.
@@ -19,8 +20,8 @@ Download the ZIP matching your OBS version from [Releases](https://github.com/su
 
 | Package | Tested target |
 |---|---|
-| `OBS32-SunjooMediaCueControl-0.5.0-Windows-x64.zip` | OBS Studio 32.2.2, Windows x64 |
-| `OBS33-SunjooMediaCueControl-0.5.0-Windows-x64.zip` | OBS Studio 33.0.0, Windows x64 |
+| `OBS32-SunjooMediaCueControl-0.7.0-Windows-x64.zip` | OBS Studio 32.2.2, Windows x64 |
+| `OBS33-SunjooMediaCueControl-0.7.0-Windows-x64.zip` | OBS Studio 33.0.0, Windows x64 |
 
 1. Close OBS and extract the complete ZIP.
 2. Run `Install-SunjooMediaCueControl.cmd` as administrator.
@@ -30,6 +31,10 @@ Download the ZIP matching your OBS version from [Releases](https://github.com/su
 
 The packages use the matching OBS plugin folder layout and include no OBS, Qt or FFmpeg runtime DLLs. Use the runtimes provided by the tested OBS version. The installer checks the target version and dependencies and backs up an existing installation of this plugin.
 
+## Manual program standby
+
+Place the media in program and press OBS media Stop. Its prepared first/In picture remains visible and silent. Press Play to start from the cue; broadcast start/stop buttons are not intercepted. A fresh preview-to-program transition restores automatic playback. Attaching the filter to already playing program media does not rewind it. Wait for preparation before going live. No decoded frame can be shown before the file has initially loaded, and black frames contained in the file remain black.
+
 ## Range editor
 
 Open the filter properties and click the range-editor button. Drag the green In and red Out handles, or click the timeline to scrub. Previous/next-frame controls, independent silent playback and numeric fields are available. Enable **영상 썸네일** for thumbnails and **오디오 파형** for waveforms. Ctrl+wheel zooms; the scrollbar or ordinary wheel pans. Apply saves the draft; Cancel discards it. The current UI uses Korean labels.
@@ -38,9 +43,9 @@ The waveform uses the maximum absolute amplitude across channels, preserving opp
 
 ## Validation and limitations
 
-The 0.5.0 binaries passed **534 checks** across OBS 32.2.2 and 33.0.0. Tests used real libobs, D3D11, native media sources, CUT/fade transitions and Qt editor windows. The practical load test used 64 filtered media sources with four 1080p videos playing and local 1080p60 H.264/AAC recording. See [validation](VALIDATION.md), [structured results](validation-summary.json) and [broadcast review](BROADCAST-REVIEW.md).
+The 0.7.0 binaries passed **802 checks** across OBS 32.2.2 and 33.0.0. Tests used real libobs, D3D11, native media sources, CUT/fade transitions and Qt editor windows. The practical load test used 64 filtered media sources with four 1080p videos playing and local 1080p60 H.264/AAC recording. See [validation](VALIDATION.md), [structured results](validation-summary.json) and [broadcast review](BROADCAST-REVIEW.md).
 
-The native media decoder can retain buffers after a source stops. Visiting all 64 HD sources used about 7.8 GiB of process private memory in the test. Automatic decoder unloading is **deferred to the next version**; see [Roadmap](ROADMAP.md). These results do not guarantee performance on every PC, codec or scene collection.
+Unused decoder file handles and poster caches are released through the native source update path. Shared, preview and transitioning sources remain loaded. Re-entering preview silently prepares the first/In frame. Preparation and decoder destruction take time; requests are staggered, and Windows/FFmpeg/GPU allocators may retain reusable memory. Four-HD playback/cleanup recording and a rapid 64-source switching test are reported separately in [validation](VALIDATION.md). The rapid test still has rendering lag, so these results do not guarantee zero broadcast impact on every PC, codec or scene collection.
 
 Local SDR video is the editor target. MP4 H.264/AAC, MOV ProRes/PCM and WebM VP9/Opus or VP8/Vorbis were tested. VLC sources, URLs, HDR preview and independent multi-canvas programs are outside the verified scope. Media preparation still takes time; the filter does not remove black frames already present in a file.
 

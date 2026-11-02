@@ -20,7 +20,7 @@ static void sleep(int ms){for(int i=0;i<ms;i+=10){if(preview)render(preview);std
 static bool until(std::function<bool()> fn,int ms=5000){for(int i=0;i<ms;i+=10){if(fn())return true;sleep(10);}return fn();}
 static std::vector<uint8_t> render(obs_source_t *s){
  std::vector<uint8_t> result;obs_enter_graphics();auto *rt=gs_texrender_create(GS_RGBA,GS_ZS_NONE);auto *stage=gs_stagesurface_create(320,180,GS_RGBA);
- if(gs_texrender_begin(rt,320,180)){vec4 clear={};gs_clear(GS_CLEAR_COLOR,&clear,0,0);gs_ortho(0,320,0,180,-100,100);obs_source_video_render(s);gs_texrender_end(rt);gs_stage_texture(stage,gs_texrender_get_texture(rt));
+ if(gs_texrender_begin(rt,320,180)){vec4 clear={};gs_clear(GS_CLEAR_COLOR,&clear,0,0);gs_ortho(0,float(std::max(1u,obs_source_get_width(s))),0,float(std::max(1u,obs_source_get_height(s))),-100,100);obs_source_video_render(s);gs_texrender_end(rt);gs_stage_texture(stage,gs_texrender_get_texture(rt));
  uint8_t *p=nullptr;uint32_t stride=0;if(gs_stagesurface_map(stage,&p,&stride)){result.resize(320*180*4);for(int y=0;y<180;++y)memcpy(result.data()+y*320*4,p+y*stride,320*4);gs_stagesurface_unmap(stage);}}
  gs_stagesurface_destroy(stage);gs_texrender_destroy(rt);obs_leave_graphics();return result;
 }

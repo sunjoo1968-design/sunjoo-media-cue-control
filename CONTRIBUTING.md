@@ -1,6 +1,6 @@
 # Contributing
 
-Author: **SunjooAn** · Current version: **0.5.0**
+Author: **SunjooAn** · Current version: **0.7.0**
 
 버그 보고 시 OBS 버전, 플러그인 버전, 스튜디오 모드 여부, 전환 종류, 미디어 코덱·프레임레이트와 재현 순서를 알려주세요. 로그를 공유할 때 계정 정보·스트림 키·개인 파일 경로를 지우세요. 원본 영상의 공개 권한이 없으면 대신 재현용 테스트 영상을 제공해 주세요.
 
