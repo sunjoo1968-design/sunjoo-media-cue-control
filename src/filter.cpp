@@ -84,6 +84,12 @@ struct Control {
  obs_weak_source_t *parent = nullptr;
  std::recursive_mutex mutex;
  bool managed = false, wasActive = false, wasShowing = false, armed = false, enabled = false;
+ bool attachedOnProgram = false;
+ bool localFile = false;
+ bool nativeUnbuffered = false;
+ uint64_t resumeBufferAfterFrame = 0;
+ uint64_t inspectedParentRevision = UINT64_MAX;
+ bool inspectedTrimmed = false;
  std::atomic<bool> mutePreview{false};
  std::atomic<int64_t> audioOut{0};
  std::atomic<bool> preparing{false};
@@ -118,7 +124,18 @@ struct Control {
   return frame;
  }
  static bool consume(std::atomic<unsigned> &count){auto n=count.load();while(n){if(count.compare_exchange_weak(n,n-1))return true;}return false;}
- void playNative(obs_source_t *source,bool pause){if(pause){if(ownPauses)return;++ownPauses;}else ++ownPlays;obs_source_media_play_pause(source,pause);}
+ void playNative(obs_source_t *source,bool pause){
+  if(pause){
+   if(ownPauses)return;
+   ++ownPauses;
+  }else{
+   ++ownPlays;
+   // Keep draining stale cue timestamps until new decoder frames arrive.
+   resumeBufferAfterFrame=videoSerial.load()+2;
+   obs_source_set_async_unbuffered(source,true);
+  }
+  obs_source_media_play_pause(source,pause);
+ }
  void restartNative(obs_source_t *source){++ownRestarts;obs_source_media_restart(source);}
  void stopNative(obs_source_t *source){++ownStops;obs_source_media_stop(source);}
  void releaseHold(obs_source_t *source){
@@ -148,6 +165,8 @@ struct Control {
  void attach(obs_source_t *source) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   parent = obs_source_get_weak_source(source);
+  inspectedParentRevision=UINT64_MAX;
+  attachedOnProgram = obs_source_active(source);
   // Persist the original options with this filter so removal after a saved/reloaded
   // scene collection can restore the user's original settings.
   if (strcmp(obs_source_get_unversioned_id(source), "ffmpeg_source")) return;
@@ -168,6 +187,7 @@ struct Control {
   }
   // v0.1.0 scene collections predate range-loop management.
   if(!obs_data_has_user_value(saved,"original_looping")){auto *settings=obs_source_get_settings(source);obs_data_set_bool(saved,"original_looping",obs_data_get_bool(settings,"looping"));obs_data_release(settings);}
+  nativeUnbuffered=obs_data_get_bool(saved,"original_unbuffered");
   obs_data_release(saved);
   auto *pending=obs_source_get_settings(self);
   if(obs_data_get_bool(pending,"idle_restore_pending")){
@@ -225,7 +245,11 @@ struct Control {
    // before seeking so FFmpeg has consumed its resume/reset-timestamp action.
    if(videoSerial<warmSerial+2&&now-prepareAt<500000000ull)return;
    captureStill=false;++captureGeneration;std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});
-   obs_source_output_video(source,nullptr);captureStill=!reuseStill;preloadIn=-1;obs_source_media_set_time(source,cueIn);seekPending=false;prepareAt=now;return;
+   // A cached In poster must remain visible while the decoder seeks behind it.
+   // Clearing async video here disables rendering even though the texture exists.
+   if(reuseStill)showStill(source);
+   else obs_source_output_video(source,nullptr);
+   captureStill=!reuseStill;preloadIn=-1;obs_source_media_set_time(source,cueIn);seekPending=false;prepareAt=now;return;
   }
   // Frame zero uses the exact native paused preload, never a later frame
   // guessed from FFmpeg's prefetched clock. Stop then re-arm without seeking
@@ -263,6 +287,7 @@ struct Control {
   if(!run) {
    mutePreview=false;
    restore(source);enabled=false;armed=false;wasActive=false;wasShowing=false;preparing=false;offStopped=false;idleAt=0;
+   inspectedParentRevision=UINT64_MAX;
    programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;freezeVideo=false;
    obs_source_release(source);return;
   }
@@ -335,26 +360,38 @@ struct Control {
    obs_source_release(source);return;
   }
   idleAt=0;
-  auto *settings=obs_source_get_settings(source);
-  if(!obs_data_get_bool(settings,"is_local_file")) {mutePreview=false;obs_data_release(settings);obs_source_release(source);return;}
-  std::string current=obs_data_get_string(settings,"local_file");
-  bool changed=current!=path;
-  if(changed){ended=false;std::atomic_store(&still,std::shared_ptr<StillFrame>{});std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});preloadIn=-1;++captureGeneration;stillIn=-1;captureStill=true;captureIn=inMs;if(programHold)stopRequest=true;}
-  bool settingsChanged=false;
-  for(const char *key:options) if(obs_data_get_bool(settings,key)) {obs_data_set_bool(settings,key,false);settingsChanged=true;}
-  const auto loopIn=active&&wasActive?runIn:inMs,loopOut=active&&wasActive?runOut:outMs;
-  if(loopIn>0||loopOut>0) {
-   if(obs_data_get_bool(settings,"looping")){obs_data_set_bool(settings,"looping",false);settingsChanged=true;}
-   loopManaged=true;
-  } else if(loopManaged) {
-   auto *saved=obs_source_get_settings(self);obs_data_set_bool(settings,"looping",obs_data_get_bool(saved,"original_looping"));obs_data_release(saved);settingsChanged=true;loopManaged=false;
+  bool changed=false;
+  const auto parentVersion=parentRevision.load();
+  const bool trimmed=active&&wasActive?(runIn>0||runOut>0):(inMs>0||outMs>0);
+  if(inspectedParentRevision!=parentVersion||inspectedTrimmed!=trimmed||unloaded){
+   inspectedParentRevision=parentVersion;
+   inspectedTrimmed=trimmed;
+   auto *settings=obs_source_get_settings(source);
+   localFile=obs_data_get_bool(settings,"is_local_file");
+   if(localFile){
+    std::string current=obs_data_get_string(settings,"local_file");
+    changed=current!=path;
+    if(changed){ended=false;std::atomic_store(&still,std::shared_ptr<StillFrame>{});std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});preloadIn=-1;++captureGeneration;stillIn=-1;captureStill=false;captureIn=inMs;if(programHold)stopRequest=true;}
+    path=std::move(current);
+    bool settingsChanged=false;
+    for(const char *key:options) if(obs_data_get_bool(settings,key)) {obs_data_set_bool(settings,key,false);settingsChanged=true;}
+    if(trimmed) {
+     if(obs_data_get_bool(settings,"looping")){obs_data_set_bool(settings,"looping",false);settingsChanged=true;}
+     loopManaged=true;
+    } else if(loopManaged) {
+     auto *saved=obs_source_get_settings(self);obs_data_set_bool(settings,"looping",obs_data_get_bool(saved,"original_looping"));obs_data_release(saved);settingsChanged=true;loopManaged=false;
+    }
+    if(settingsChanged)obs_source_update(source,settings);
+    managed=true;
+   }else path.clear();
+   obs_data_release(settings);
   }
-  if(settingsChanged)obs_source_update(source,settings);
-  // Decoder output is already paced. Discard OBS's stale preview timestamp
-  // backlog when resuming instead of waiting for its buffered clock to catch up.
-  obs_source_set_async_unbuffered(source,true);
-  managed=true;obs_data_release(settings);
-  if(current.empty()){path=current;armed=false;obs_source_release(source);return;}
+  if(!localFile||path.empty()){mutePreview=false;armed=false;obs_source_release(source);return;}
+  // Bypass the queue while cueing, then let OBS pace normal program playback.
+  const bool unbuffered=!active||preparing||programHold||nativeUnbuffered||
+                        videoSerial.load()<resumeBufferAfterFrame;
+  if(obs_source_async_unbuffered(source)!=unbuffered)
+   obs_source_set_async_unbuffered(source,unbuffered);
   auto state=obs_source_media_get_state(source);
   auto duration=obs_source_media_get_duration(source);
   // If a return raced the deferred close, OBS already opened this source at
@@ -369,6 +406,11 @@ struct Control {
   if(invalidRange){playNative(source,true);mutePreview=true;armed=false;preparing=false;enabled=true;wasShowing=showing;wasActive=active;obs_source_release(source);return;}
   offStopped=false;
   if(active) {
+   if(attachedOnProgram&&!enabled&&!preparing&&!programHold){
+    attachedOnProgram=false;
+    programHold=true;
+    prepare(source,state,inMs);
+   }
    if(!programHold&&playRequest.exchange(false)){
     const bool eof=ended.load(),restart=restartRequest.exchange(false);const bool replay=rangeEnded||eof||restart;
     if(replay){programHold=true;playAfterCue=true;rangeEnded=false;runIn=inMs;runOut=outMs>0?(duration>0?std::min(outMs,duration):outMs):0;audioOut=runOut;preparing=false;prepare(source,eof?OBS_MEDIA_STATE_ENDED:state,inMs);}
@@ -390,7 +432,7 @@ struct Control {
    if(programHold){
     if(preparing)prepareTick(source,false);
     if(!preparing&&playAfterCue)releaseHold(source);
-    mutePreview=programHold||preparing;armed=false;enabled=true;wasActive=true;wasShowing=showing;path=std::move(current);obs_source_release(source);return;
+    mutePreview=programHold||preparing;armed=false;enabled=true;wasActive=true;wasShowing=showing;obs_source_release(source);return;
    }
    // Attaching/enabling on an already-live source must not rewind it.
    if(!wasActive) {
@@ -398,15 +440,21 @@ struct Control {
     else if(!preparing&&(unloaded||(enabled&&state!=OBS_MEDIA_STATE_PLAYING)||inMs>0))prepare(source,state,inMs);
    }
    if(preparing)prepareTick(source,true);
-   if(!preparing&&!rangeEnded&&runOut>0&&obs_source_media_get_time(source)>=runOut){playNative(source,true);rangeEnded=true;}
+   if(!preparing&&ended&&state==OBS_MEDIA_STATE_ENDED)playNative(source,true);
+   if(!preparing&&!rangeEnded&&runOut>0&&obs_source_media_get_time(source)>=runOut){
+    freezeVideo=true;
+    playNative(source,true);
+    rangeEnded=true;
+   }
    if(rangeEnded&&state==OBS_MEDIA_STATE_PLAYING)playNative(source,true);
    mutePreview=preparing||rangeEnded||ended;
    armed=false;
   } else {
+   attachedOnProgram=false;
    programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;
    if(!enabled||!wasShowing||wasActive||changed||appliedRevision!=revision||(!armed&&!preparing)||state==OBS_MEDIA_STATE_ENDED||state==OBS_MEDIA_STATE_STOPPED) {
     prepare(source,state,inMs,changed);
-   } else if(!preparing&&(state==OBS_MEDIA_STATE_PLAYING||std::abs(obs_source_media_get_time(source)-cueIn)>80)) {
+   } else if(!preparing&&state==OBS_MEDIA_STATE_PLAYING) {
     prepare(source,state,inMs);
    }
    if(preparing)prepareTick(source,false);
@@ -415,7 +463,7 @@ struct Control {
    // async_active flag. Explicitly expose that texture on initial preparation.
    if(!obs_source_get_width(source))obs_source_show_preloaded_video(source);
   }
-  enabled=true;wasActive=active;wasShowing=showing;path=std::move(current);
+  enabled=true;wasActive=active;wasShowing=showing;
   obs_source_release(source);
  }
  bool mark(bool out) {

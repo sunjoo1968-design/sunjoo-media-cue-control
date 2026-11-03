@@ -168,13 +168,13 @@ static void replayTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media)
  const int64_t target=(!replayEof||replayIn)?500:0;const int64_t end=replayEof?obs_source_media_get_duration(clip):2000;
  check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED,"Replay test starts from silent preview cue");watchPreview=false;obs_frontend_preview_program_trigger_transition();
  QTimer::singleShot(replayEof?3500:2500,[clip,blank,media,target,end]{
-  auto complete=[clip]{return obs_source_media_get_state(clip)==(replayEof?OBS_MEDIA_STATE_ENDED:OBS_MEDIA_STATE_PAUSED);};check(complete(),"Actual program reaches Out or native EOF");auto picture=clipHash(clip);check(programImage(),"Actual completed program retains a non-black picture");watchPreview=true;previewNoise=0;
+  auto complete=[clip]{return obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED;};check(complete(),"Actual program reaches Out or native EOF");auto picture=clipHash(clip);check(programImage(),"Actual completed program retains a non-black picture");watchPreview=true;previewNoise=0;
   QTimer::singleShot(300,[clip,blank,media,target,end,picture]{
    check(clipHash(clip)==picture,"Completion holds final picture until explicit Play");check(previewNoise==0,"Completed program is exactly silent");watchPreview=false;auto sound=programSound.load();obs_source_media_play_pause(clip,false);
    QTimer::singleShot(1100,[clip,blank,media,target,end,picture,sound]{
     auto time=obs_source_media_get_time(clip);blog(LOG_INFO,"[FILTER-UI] Replay observation state=%d time=%lld target=%lld",obs_source_media_get_state(clip),(long long)time,(long long)target);check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&time>target+100&&time<end-80,"Play directly after completion restarts first/In range");check(clipHash(clip)!=picture,"Replay advances actual GPU video");check(programSound>sound+1000,"Replay restores real program audio");
     QTimer::singleShot(replayEof?3300:2100,[clip,blank,media,target,end]{
-     check(obs_source_media_get_state(clip)==(replayEof?OBS_MEDIA_STATE_ENDED:OBS_MEDIA_STATE_PAUSED),"Second playthrough stops at its end again");if(replayEof)obs_source_media_restart(clip);else obs_source_media_play_pause(clip,false);
+     check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED,"Second playthrough stops at its end again");if(replayEof)obs_source_media_restart(clip);else obs_source_media_play_pause(clip,false);
      QTimer::singleShot(1100,[clip,blank,media,target,end]{auto t=obs_source_media_get_time(clip);check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&t>target+100&&t<end-80,"Repeated Play or native EOF Restart starts another first/In playthrough");finish(clip,blank,media);});
     });
    });

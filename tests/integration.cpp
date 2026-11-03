@@ -160,11 +160,11 @@ int main(int argc,char **argv){
  obs_source_filter_remove(mp4.source,mp4.filter);sleep(100);settings=obs_source_get_settings(mp4.source);check(obs_data_get_bool(settings,"restart_on_activate")&&obs_data_get_bool(settings,"close_when_inactive"),"Removing filter restores original native settings");obs_data_release(settings);
  obs_transition_set(fade,obs_scene_get_source(scene));sleep(300);t=obs_source_media_get_time(mp4.source);
  auto *liveFilter=obs_source_create("sunjoo_media_cue_control","Attach while live",nullptr,nullptr);obs_source_filter_add(mp4.source,liveFilter);sleep(300);
- check(obs_source_media_get_time(mp4.source)>t+150,"Attaching filter to already-live native source preserves playback");
+ check(until([&]{return obs_source_media_get_state(mp4.source)==OBS_MEDIA_STATE_PAUSED;}),"Attaching on program prepares manual standby");obs_source_media_play_pause(mp4.source,false);check(until([&]{return obs_source_media_get_state(mp4.source)==OBS_MEDIA_STATE_PLAYING&&obs_source_media_get_time(mp4.source)>400;}),"Explicit Play leaves newly attached program standby");
  auto *buttons=obs_source_properties(liveFilter);obs_property_button_clicked(obs_properties_get(buttons,"mark_in"),liveFilter);sleep(100);
  auto *buttonSettings=obs_source_get_settings(liveFilter);auto markedIn=obs_data_get_double(buttonSettings,"in_seconds");obs_data_release(buttonSettings);
  check(markedIn>0.4&&markedIn<1.2,"Mark In button stores current native playback position");
- obs_property_button_clicked(obs_properties_get(buttons,"mark_out"),liveFilter);sleep(80);buttonSettings=obs_source_get_settings(liveFilter);
+ until([&]{return obs_source_media_get_time(mp4.source)>int64_t(markedIn*1000)+33;},1200);obs_property_button_clicked(obs_properties_get(buttons,"mark_out"),liveFilter);sleep(80);buttonSettings=obs_source_get_settings(liveFilter);
  check(obs_data_get_double(buttonSettings,"out_seconds")>markedIn,"Mark Out button stores later native playback position");obs_data_release(buttonSettings);
  obs_property_button_clicked(obs_properties_get(buttons,"reset_range"),liveFilter);sleep(80);buttonSettings=obs_source_get_settings(liveFilter);
  check(obs_data_get_double(buttonSettings,"in_seconds")==0&&obs_data_get_double(buttonSettings,"out_seconds")==0,"Reset button restores whole-file In/Out values");obs_data_release(buttonSettings);obs_properties_destroy(buttons);

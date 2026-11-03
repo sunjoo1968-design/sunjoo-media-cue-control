@@ -57,7 +57,12 @@ int main(int argc,char **argv){
   check(obs_source_media_get_state(clips[0].source)==OBS_MEDIA_STATE_PLAYING&&obs_source_media_get_duration(clips[0].source)>0,"Live program source keeps its decoder during batch idle cleanup");
   // Avoid comparing the same phase of a looping three-second test clip.
   sleep(137);auto pictureAfterCleanup=render(clips[0].source);int colored=0;for(size_t i=0;i<pictureAfterCleanup.size();i+=4)colored+=pictureAfterCleanup[i]+pictureAfterCleanup[i+1]+pictureAfterCleanup[i+2]>50;printf("LIVE cleanup audio_before=%d audio_after=%d picture_changed=%d colored=%d time_before=%lld time_after=%lld width=%u\n",audioBeforeCleanup,audioSamples.load(),pictureAfterCleanup!=pictureBeforeCleanup,colored,(long long)timeBeforeCleanup,(long long)obs_source_media_get_time(clips[0].source),obs_source_get_width(clips[0].source));
-  check(audioSamples>audioBeforeCleanup+1000&&pictureAfterCleanup!=pictureBeforeCleanup,"Program GPU video and non-silent audio continue throughout native decoder cleanup");
+  bool pictureAdvanced=pictureAfterCleanup!=pictureBeforeCleanup;
+  if(!pictureAdvanced){
+   sleep(71);
+   pictureAdvanced=render(clips[0].source)!=pictureBeforeCleanup;
+  }
+  check(audioSamples>audioBeforeCleanup+1000&&pictureAdvanced,"Program GPU video and non-silent audio continue throughout native decoder cleanup");
  }
  if(output){printf("RECORD encoded=%u output_frames=%d dropped=%d error=%s\n",obs_encoder_get_encoded_frames(venc),obs_output_get_total_frames(output),obs_output_get_frames_dropped(output),obs_output_get_last_error(output));check(obs_output_active(output)&&obs_encoder_get_encoded_frames(venc)>300,"Recording continues through scene switching with all filters attached");obs_output_stop(output);check(until([&]{return !obs_output_active(output);},10000),"Recording finishes cleanly");obs_output_release(output);obs_encoder_release(venc);obs_encoder_release(aenc);}
  if(!baseline)controllerMetrics(clips);

@@ -1,4 +1,4 @@
-Sunjoo Media Cue Control 0.8.0
+Sunjoo Media Cue Control 0.8.2
 Copyright (C) 2026 SunjooAn
 SPDX-License-Identifier: GPL-2.0-or-later
 

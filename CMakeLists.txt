@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(sunjoo_media_cue_filter VERSION 0.8.0 LANGUAGES CXX RC)
+project(sunjoo_media_cue_filter VERSION 0.8.2 LANGUAGES CXX RC)
 set(CMAKE_CXX_STANDARD 17)
 get_filename_component(WORKSPACE "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set(OBS_MAJOR "33" CACHE STRING "32 or 33")
