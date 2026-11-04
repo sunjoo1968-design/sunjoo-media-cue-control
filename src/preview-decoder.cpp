@@ -24,7 +24,7 @@ void PreviewDecoder::open(const std::string &path){
 }
 Picture PreviewDecoder::convert(AVFrame *f){
  if(f->color_trc==AVCOL_TRC_SMPTE2084||f->color_trc==AVCOL_TRC_ARIB_STD_B67)throw std::runtime_error("HDR preview is not supported by this SDR editor");
- Picture picture;double factor=std::min({1.0,960.0/f->width,540.0/f->height});picture.width=std::max(1,int(f->width*factor));picture.height=std::max(1,int(f->height*factor));
+ Picture picture;double factor=fullSize_?1.0:std::min({1.0,960.0/f->width,540.0/f->height});picture.width=std::max(1,int(f->width*factor));picture.height=std::max(1,int(f->height*factor));
  auto pts=f->best_effort_timestamp;picture.timeMs=pts==AV_NOPTS_VALUE?0:std::max<int64_t>(0,av_rescale_q(pts-start_,format_->streams[stream_]->time_base,{1,1000}));
  picture.nextTimeMs=pts!=AV_NOPTS_VALUE&&f->duration>0?av_rescale_q(pts-start_+f->duration,format_->streams[stream_]->time_base,{1,1000}):picture.timeMs+int64_t(std::ceil(frameMs));
  picture.nextTimeMs=std::max(picture.timeMs+1,picture.nextTimeMs);

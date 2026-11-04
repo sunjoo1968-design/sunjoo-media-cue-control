@@ -42,5 +42,7 @@ if ($cueMajor -eq '33') {
     New-Item -ItemType Directory -Force (Split-Path $cueTarget -Parent) | Out-Null
     Copy-Item -LiteralPath $cueSource -Destination $cueTarget -Force
 }
-Write-Host "Installed Sunjoo Media Cue Control 0.8.2 / SunjooAn / OBS $cueMajor"
+$cueInstalledDll = if ($cueMajor -eq '33') { Join-Path $cueTarget 'sunjoo-media-cue-filter.dll' } else { $cueTarget }
+$cueInstalledVersion = (Get-Item -LiteralPath $cueInstalledDll).VersionInfo.ProductVersion
+Write-Host "Installed Sunjoo Media Cue Control $cueInstalledVersion / SunjooAn / OBS $cueMajor"
 Write-Host 'Start OBS Studio Mode. Drag a video into OBS, then add Sunjoo Media Cue Control under Audio/Video Filters of that Media Source.'

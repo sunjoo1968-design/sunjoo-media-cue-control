@@ -6,10 +6,13 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <future>
 #include <unordered_set>
 #include <unordered_map>
 #include <util/platform.h>
 #include "editor.hpp"
+#include "preview-decoder.hpp"
+#include "range-cache.hpp"
 
 OBS_DECLARE_MODULE()
 MODULE_EXPORT const char *obs_module_name(void) { return "Sunjoo Media Cue Control " FILTER_VERSION; }
@@ -17,6 +20,13 @@ MODULE_EXPORT const char *obs_module_description(void) { return "Visible media p
 MODULE_EXPORT const char *obs_module_author(void) { return "SunjooAn"; }
 
 namespace {
+thread_local const void *rangeAudioSender=nullptr;
+bool programUsesCut(){
+ auto *transition=obs_get_output_source(0);
+ const bool cut=transition&&strcmp(obs_source_get_unversioned_id(transition),"cut_transition")==0;
+ obs_source_release(transition);
+ return cut;
+}
 constexpr const char *options[] = {"restart_on_activate", "close_when_inactive", "clear_on_media_end"};
 // Video-thread-only scheduler: spread native decoder destruction across frames.
 uint64_t nextIdleRelease=0;
@@ -79,7 +89,7 @@ bool visibleInScene(obs_source_t *source) {
  return visibility.visible.count(obs_source_get_uuid(source))!=0;
 }
 struct Control {
- struct StillFrame {obs_source_frame *frame;int64_t target;uint64_t generation;StillFrame(const obs_source_frame *src,int64_t at,uint64_t gen):frame(obs_source_frame_create(src->format,src->width,src->height)),target(at),generation(gen){obs_source_frame_copy(frame,src);}~StillFrame(){obs_source_frame_destroy(frame);}};
+ struct StillFrame {obs_source_frame *frame;int64_t target;int64_t cachedOut=0;std::shared_ptr<cue_range::Cache> range;StillFrame(const obs_source_frame *src,int64_t at):frame(obs_source_frame_create(src->format,src->width,src->height)),target(at){obs_source_frame_copy(frame,src);}~StillFrame(){obs_source_frame_destroy(frame);}};
  obs_source_t *self;
  obs_weak_source_t *parent = nullptr;
  std::recursive_mutex mutex;
@@ -87,6 +97,7 @@ struct Control {
  bool attachedOnProgram = false;
  bool localFile = false;
  bool nativeUnbuffered = false;
+ bool canCacheRange = false;
  uint64_t resumeBufferAfterFrame = 0;
  uint64_t inspectedParentRevision = UINT64_MAX;
  bool inspectedTrimmed = false;
@@ -104,22 +115,22 @@ struct Control {
  std::atomic<bool> programHold{false},stopRequest{false},playRequest{false},restartRequest{false};
  std::atomic<unsigned> ownStops{0},ownPlays{0},ownRestarts{0},ownPauses{0};
  bool playAfterCue=false;std::atomic<bool> releasingZero{false};
- std::shared_ptr<StillFrame> still,candidate;
+ std::shared_ptr<StillFrame> still;
+ std::atomic<bool> cancelPoster{false};
+ std::future<std::shared_ptr<StillFrame>> posterJob;
+ uint64_t posterGeneration=0,failedPosterGeneration=0;
  std::atomic<uint64_t> captureGeneration{0},prepareRequests{0},prepares{0},coalesced{0};
  std::atomic<bool> ended{false};
- std::atomic<bool> captureStill{true};std::atomic<int64_t> captureIn{0};
+ std::atomic<int64_t> captureIn{0};
  std::atomic<int64_t> preloadIn{-1};
  uint64_t settleAt=0;int64_t stillIn=-1;bool reuseStill=false,seekPending=false;int zeroFallback=0;
+ std::shared_ptr<cue_range::Cache> playingRange;
+ uint64_t rangeStart=0;
+ size_t rangePicture=0,rangeSample=0;
  std::atomic<bool> freezeVideo{false};std::atomic<uint64_t> videoSerial{0},posterTs{UINT64_MAX};uint64_t warmSerial=0;
- void showStill(obs_source_t *source){auto target=captureIn.load();auto image=std::atomic_load(&still);if(image&&image->target!=target)image.reset();if(!image){image=std::atomic_load(&candidate);if(image&&(image->target!=target||image->generation!=captureGeneration))image.reset();}if(image){posterTs=image->frame->timestamp;obs_source_output_video(source,image->frame);obs_source_set_video_frame(source,image->frame);preloadIn=target;}else if(preloadIn==target)obs_source_show_preloaded_video(source);}
+ void showStill(obs_source_t *source){auto target=captureIn.load();auto image=std::atomic_load(&still);if(image&&image->target!=target)image.reset();if(image){posterTs=image->frame->timestamp;obs_source_output_video(source,image->frame);obs_source_set_video_frame(source,image->frame);preloadIn=target;}else if(preloadIn==target)obs_source_show_preloaded_video(source);}
  obs_source_frame *video(obs_source_frame *frame){
   if(frame&&frame->timestamp!=posterTs)++videoSerial;
-  if(frame&&captureStill&&frame->width&&frame->height&&frame->width<=8192&&frame->height<=8192){
-   auto *source=obs_filter_get_parent(self);
-   if(source){auto target=captureIn.load(),time=obs_source_media_get_time(source);auto gen=captureGeneration.load();
-    if(target>0&&time>=std::max<int64_t>(0,target-80)&&time<=target+100){auto image=std::make_shared<StillFrame>(frame,target,gen);if(captureStill&&gen==captureGeneration&&target==captureIn)std::atomic_store(&candidate,image);}
-   }
-  }
   if((programHold||freezeVideo)&&frame){obs_source_release_frame(obs_filter_get_parent(self),frame);return nullptr;}
   return frame;
  }
@@ -144,6 +155,41 @@ struct Control {
   ended=false;freezeVideo=false;playAfterCue=false;if(cueIn==0){releasingZero=true;restartNative(source);}else programHold=false;
   playNative(source,false);
  }
+ void outputPreparedRange(obs_source_t *source){
+  const auto tick=obs_get_video_frame_time();
+  const auto interval=obs_get_frame_interval_ns();
+  const auto elapsed=tick-rangeStart;
+  const auto duration=uint64_t(runOut-runIn)*1000000;
+  const auto &cache=*playingRange;
+  if(elapsed>=duration){
+   rangeEnded=true;
+   playingRange.reset();
+   return;
+  }
+  if(elapsed){
+   const auto previous=rangePicture;
+   while(rangePicture+1<cache.video.size()&&cache.video[rangePicture+1].offset<=elapsed+interval/2)++rangePicture;
+   if(rangePicture!=previous){
+    auto *frame=cache.video[rangePicture].frame.get();
+    frame->timestamp=tick;
+    obs_source_set_video_frame(source,frame);
+   }
+  }
+  if(!cache.rate)return;
+  const size_t until=std::min(cache.audio[0].size(),size_t((elapsed+interval)*cache.rate/1000000000));
+  if(until<=rangeSample)return;
+  obs_source_audio audio={};
+  audio.format=AUDIO_FORMAT_FLOAT_PLANAR;
+  audio.samples_per_sec=cache.rate;
+  audio.speakers=cache.channels==1?SPEAKERS_MONO:SPEAKERS_STEREO;
+  audio.frames=uint32_t(until-rangeSample);
+  audio.timestamp=rangeStart+rangeSample*1000000000ull/cache.rate;
+  for(size_t ch=0;ch<cache.channels;++ch)audio.data[ch]=reinterpret_cast<const uint8_t*>(cache.audio[ch].data()+rangeSample);
+  rangeAudioSender=this;
+  obs_source_output_audio(source,&audio);
+  rangeAudioSender=nullptr;
+  rangeSample=until;
+ }
  static void stopped(void *data,calldata_t *event){
   auto *c=static_cast<Control*>(data);
   auto *source=static_cast<obs_source_t*>(calldata_ptr(event,"source"));
@@ -161,7 +207,7 @@ struct Control {
  static void restarted(void *data,calldata_t *event){auto *c=static_cast<Control*>(data);const bool internal=consume(c->ownRestarts);if(c->programHold){auto *source=static_cast<obs_source_t*>(calldata_ptr(event,"source"));if(source)c->showStill(source);if(internal&&c->releasingZero.exchange(false))c->programHold=false;}if(!internal){c->restartRequest=true;c->playRequest=true;}}
  static void parentUpdated(void *data,calldata_t*){++static_cast<Control*>(data)->parentRevision;}
  explicit Control(obs_source_t *source) : self(source) {proc_handler_add(obs_source_get_proc_handler(self),"void cue_metrics(out int visibility_queries, out int visibility_scans, out int prepare_requests, out int prepares, out int coalesced)",[](void *d,calldata_t *v){auto *c=static_cast<Control*>(d);calldata_set_int(v,"visibility_queries",visibility.queries);calldata_set_int(v,"visibility_scans",visibility.scans);calldata_set_int(v,"prepare_requests",c->prepareRequests);calldata_set_int(v,"prepares",c->prepares);calldata_set_int(v,"coalesced",c->coalesced);},this);}
- ~Control() { detach(); }
+ ~Control() { cancelPoster=true;if(posterJob.valid())posterJob.wait();detach(); }
  void attach(obs_source_t *source) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   parent = obs_source_get_weak_source(source);
@@ -228,7 +274,9 @@ struct Control {
  }
  void prepare(obs_source_t *source,obs_media_state state,int64_t target,bool force=false) {
   ++prepareRequests;if(!force&&preparing&&!unloaded&&cueIn==target&&appliedRevision==revision){++coalesced;return;}++prepares;preparing=true;ended=false;mutePreview=true;freezeVideo=true;
-  reuseStill=stillIn==target&&bool(std::atomic_load(&still));captureStill=false;++captureGeneration;captureIn=target;std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});if(!reuseStill)std::atomic_store(&still,std::shared_ptr<StillFrame>{});
+  const auto previousStill=std::atomic_load(&still);
+  reuseStill=stillIn==target&&previousStill&&previousStill->cachedOut==outMs;
+  ++captureGeneration;captureIn=target;if(!reuseStill)std::atomic_store(&still,std::shared_ptr<StillFrame>{});
   cueIn=target;settleAt=0;zeroFallback=0;seekPending=true;warmSerial=videoSerial;
   waitingRestart=unloaded||state==OBS_MEDIA_STATE_ENDED||state==OBS_MEDIA_STATE_STOPPED||state==OBS_MEDIA_STATE_NONE;unloaded=false;
   if(target==0&&preloadIn==0){waitingRestart=false;seekPending=false;zeroFallback=3;stopNative(source);}
@@ -244,12 +292,12 @@ struct Control {
    // Metadata PLAYING is not a decoder acknowledgement. Observe live frames
    // before seeking so FFmpeg has consumed its resume/reset-timestamp action.
    if(videoSerial<warmSerial+2&&now-prepareAt<500000000ull)return;
-   captureStill=false;++captureGeneration;std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});
+   ++captureGeneration;
    // A cached In poster must remain visible while the decoder seeks behind it.
    // Clearing async video here disables rendering even though the texture exists.
    if(reuseStill)showStill(source);
    else obs_source_output_video(source,nullptr);
-   captureStill=!reuseStill;preloadIn=-1;obs_source_media_set_time(source,cueIn);seekPending=false;prepareAt=now;return;
+   preloadIn=-1;obs_source_media_set_time(source,cueIn);seekPending=false;prepareAt=now;return;
   }
   // Frame zero uses the exact native paused preload, never a later frame
   // guessed from FFmpeg's prefetched clock. Stop then re-arm without seeking
@@ -263,18 +311,56 @@ struct Control {
    // A late native Stop completion or user Play can overwrite PAUSED metadata.
    // Reassert the silent hold; zero playback always restarts both streams.
    if(state!=OBS_MEDIA_STATE_PAUSED){playNative(source,true);return;}
-   obs_source_output_video(source,nullptr);obs_source_show_preloaded_video(source);captureStill=false;preparing=false;armed=!active;if(active){programHold=true;releaseHold(source);}return;
+   obs_source_output_video(source,nullptr);obs_source_show_preloaded_video(source);preparing=false;armed=!active;if(active){programHold=true;releaseHold(source);}return;
   }
-  if(cueIn==0){if(now-prepareAt<200000000ull)return;captureStill=false;zeroFallback=1;playNative(source,true);return;}
+  if(cueIn==0){if(now-prepareAt<200000000ull)return;zeroFallback=1;playNative(source,true);return;}
   if(now-prepareAt<20000000ull)return;
   auto pos=obs_source_media_get_time(source);
   if(pos<cueIn-20){if(state==OBS_MEDIA_STATE_PAUSED&&!ownPlays)playNative(source,false);return;}
-  auto image=reuseStill?std::atomic_load(&still):std::atomic_load(&candidate);
-  if(image&&(image->target!=cueIn||(!reuseStill&&image->generation!=captureGeneration)))image.reset();
+  auto image=reuseStill?std::atomic_load(&still):std::shared_ptr<StillFrame>{};
   if(cueIn>0&&pos>cueIn+80&&now-prepareAt<500000000ull)return;
   if(!active&&!settleAt){playNative(source,true);settleAt=now+50000000ull;return;}
   if(!active&&(now<settleAt||state!=OBS_MEDIA_STATE_PAUSED)){if(state!=OBS_MEDIA_STATE_PAUSED)playNative(source,true);return;}
-  captureStill=false;
+  if(!image){
+   const auto generation=captureGeneration.load();
+   if(posterJob.valid()){
+    if(posterGeneration!=generation)cancelPoster=true;
+    if(posterJob.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+    auto decoded=posterJob.get();
+    if(posterGeneration==generation){
+     image=std::move(decoded);
+     if(!image)failedPosterGeneration=generation;
+    }
+   }
+   if(!image){
+    if(failedPosterGeneration==generation)return;
+    cancelPoster=false;
+    posterGeneration=generation;
+    try{
+     posterJob=std::async(std::launch::async,[this,file=path,target=cueIn,out=outMs,prepareRange=canCacheRange&&!active&&!programHold]()->std::shared_ptr<StillFrame>{
+      try{
+       cue_editor::PreviewDecoder decoder(cancelPoster,true);
+       decoder.open(file);
+       auto picture=decoder.frameAt(target,[this]{return cancelPoster.load();});
+       if(picture.rgba.empty()||target<picture.timeMs||target>=picture.nextTimeMs)return {};
+       obs_source_frame frame={};
+       frame.format=VIDEO_FORMAT_RGBA;frame.width=picture.width;frame.height=picture.height;
+       frame.data[0]=picture.rgba.data();frame.linesize[0]=picture.width*4;frame.full_range=true;
+       frame.timestamp=os_gettime_ns();
+       auto stillFrame=std::make_shared<StillFrame>(&frame,target);
+       stillFrame->cachedOut=out;
+       if(prepareRange){
+        try{stillFrame->range=cue_range::prepare(file,target,out,cancelPoster);}
+        catch(const std::exception &){}
+       }
+       return stillFrame;
+      }catch(const std::exception &){return {};}
+     });
+    }catch(const std::exception &){failedPosterGeneration=generation;}
+    return;
+   }
+  }
+
   if(image){std::atomic_store(&still,image);stillIn=cueIn;showStill(source);}
   preparing=false;armed=!active;
   if(active){freezeVideo=false;playNative(source,false);}
@@ -285,6 +371,7 @@ struct Control {
   if(!source)return;
   const bool run=obs_source_enabled(self);
   if(!run) {
+   playingRange.reset();
    mutePreview=false;
    restore(source);enabled=false;armed=false;wasActive=false;wasShowing=false;preparing=false;offStopped=false;idleAt=0;
    inspectedParentRevision=UINT64_MAX;
@@ -322,6 +409,7 @@ struct Control {
   // Inspect scene-item visibility too: OBS can retain show/active counts briefly
   // while the eye-OFF audio transition is draining.
   if(!visible||(!showing&&!active)) {
+   playingRange.reset();
    programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;freezeVideo=false;
    // A managed clip that leaves both buses must not continue decoding/audio.
    // Issue once on departure; do not repeatedly control unrelated hidden items.
@@ -350,7 +438,7 @@ struct Control {
       // codec, rate, color range or source identity. Unlike STOP, reinitializing
       // also destroys an already stopped decoder. Restore exact options next.
       obs_data_set_string(settings,"ffmpeg_options",(idleOptions+" ").c_str());obs_data_set_bool(settings,"close_when_inactive",true);obs_data_set_bool(settings,"restart_on_activate",true);
-      captureStill=false;std::atomic_store(&still,std::shared_ptr<StillFrame>{});std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});preloadIn=-1;++captureGeneration;
+      std::atomic_store(&still,std::shared_ptr<StillFrame>{});preloadIn=-1;++captureGeneration;
       stopNative(source);
       mutePreview=true;refreshRevision=parentRevision.load();idlePhase=1;managed=true;obs_source_update(source,settings);nextIdleRelease=now+100000000ull;
      }
@@ -368,10 +456,14 @@ struct Control {
    inspectedTrimmed=trimmed;
    auto *settings=obs_source_get_settings(source);
    localFile=obs_data_get_bool(settings,"is_local_file");
+   canCacheRange=localFile&&obs_data_get_int(settings,"speed_percent")==100&&
+                 obs_data_get_int(settings,"color_range")==VIDEO_RANGE_DEFAULT&&
+                 !*obs_data_get_string(settings,"ffmpeg_options")&&
+                 !*obs_data_get_string(settings,"input_format");
    if(localFile){
     std::string current=obs_data_get_string(settings,"local_file");
     changed=current!=path;
-    if(changed){ended=false;std::atomic_store(&still,std::shared_ptr<StillFrame>{});std::atomic_store(&candidate,std::shared_ptr<StillFrame>{});preloadIn=-1;++captureGeneration;stillIn=-1;captureStill=false;captureIn=inMs;if(programHold)stopRequest=true;}
+    if(changed){ended=false;std::atomic_store(&still,std::shared_ptr<StillFrame>{});preloadIn=-1;++captureGeneration;stillIn=-1;captureIn=inMs;if(programHold)stopRequest=true;}
     path=std::move(current);
     bool settingsChanged=false;
     for(const char *key:options) if(obs_data_get_bool(settings,key)) {obs_data_set_bool(settings,key,false);settingsChanged=true;}
@@ -405,8 +497,15 @@ struct Control {
   invalidRange=(checkedOut>0&&checkedOut<=checkedIn)||(duration>0&&checkedIn>=duration);
   if(invalidRange){playNative(source,true);mutePreview=true;armed=false;preparing=false;enabled=true;wasShowing=showing;wasActive=active;obs_source_release(source);return;}
   offStopped=false;
+  if(!active)playingRange.reset();
   if(active) {
-   if(attachedOnProgram&&!enabled&&!preparing&&!programHold){
+   if(playingRange&&(stopRequest||playRequest||restartRequest))playingRange.reset();
+   if(playingRange){
+    outputPreparedRange(source);
+    obs_source_release(source);
+    return;
+   }
+   if(attachedOnProgram&&(runIn>0||runOut>0)&&!enabled&&!preparing&&!programHold){
     attachedOnProgram=false;
     programHold=true;
     prepare(source,state,inMs);
@@ -436,7 +535,19 @@ struct Control {
    }
    // Attaching/enabling on an already-live source must not rewind it.
    if(!wasActive) {
-    if(armed&&!preparing){if(cueIn==0){programHold=true;releaseHold(source);}else {freezeVideo=false;playNative(source,false);}}
+    if(armed&&!preparing){
+     auto prepared=std::atomic_load(&still);
+     if(canCacheRange&&cueIn>0&&prepared&&prepared->cachedOut==runOut&&prepared->range&&state==OBS_MEDIA_STATE_PAUSED&&programUsesCut()){
+      playingRange=prepared->range;
+      rangeStart=obs_get_video_frame_time();
+      rangePicture=rangeSample=0;
+      freezeVideo=true;mutePreview=true;armed=false;wasActive=true;wasShowing=showing;
+      outputPreparedRange(source);
+      obs_source_release(source);
+      return;
+     }
+     if(cueIn==0){programHold=true;releaseHold(source);}else {freezeVideo=false;playNative(source,false);}
+    }
     else if(!preparing&&(unloaded||(enabled&&state!=OBS_MEDIA_STATE_PLAYING)||inMs>0))prepare(source,state,inMs);
    }
    if(preparing)prepareTick(source,true);
@@ -483,6 +594,7 @@ struct Control {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   if(invalidRange)return "구간 오류: Out은 In보다 커야 하며 In은 파일 길이보다 짧아야 합니다.";
   if(programHold&&!preparing)return "프로그램 스틸 대기 — 첫 프레임 / In 지점 · 재생 명령 대기 · 무음";
+  if(preparing&&failedPosterGeneration&&failedPosterGeneration==captureGeneration)return "In 프레임을 읽지 못했습니다 — 무음 대기";
   if(preparing)return "In 지점 준비 중 — 키프레임부터 무음으로 준비합니다.";
   if(idlePhase)return "화면 밖 미디어 디코더 정리 중 — 무음";
   if(unloaded)return "5초 미사용 — 디코더 메모리 해제 / 프리뷰 진입 시 다시 준비";
@@ -522,6 +634,7 @@ bool obs_module_load() {
  info.filter_video=[](void *p,obs_source_frame *frame)->obs_source_frame*{return static_cast<Control*>(p)->video(frame);};
  info.filter_audio=[](void *p,obs_audio_data *audio)->obs_audio_data* {
   auto *c=static_cast<Control*>(p);
+  if(rangeAudioSender==c)return audio;
   // OBS keeps the parent/filter alive throughout this callback. Avoid waiting
   // on scene enumeration or video preparation while holding its audio lock.
   auto *s=obs_filter_get_parent(c->self);

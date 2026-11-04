@@ -16,11 +16,11 @@ struct Picture {int width=0,height=0;int64_t timeMs=0,nextTimeMs=0;std::vector<u
 class PreviewDecoder {
  AVFormatContext *format_=nullptr;AVCodecContext *codec_=nullptr;
  AVPacket *packet_=nullptr;AVFrame *frame_=nullptr,*last_=nullptr;SwsContext *scale_=nullptr;
- std::atomic<bool> &stop_;int stream_=-1;int64_t start_=0;
+ std::atomic<bool> &stop_;bool fullSize_;int stream_=-1;int64_t start_=0;
  Picture convert(AVFrame *frame);
  Picture seek(int64_t ms,bool before,const std::function<bool()> &cancel);
 public:
- explicit PreviewDecoder(std::atomic<bool> &stop):stop_(stop){}
+ explicit PreviewDecoder(std::atomic<bool> &stop,bool fullSize=false):stop_(stop),fullSize_(fullSize){}
  ~PreviewDecoder();
  void open(const std::string &path);
  Picture frameAt(int64_t ms,const std::function<bool()> &cancel);
