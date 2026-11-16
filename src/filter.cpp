@@ -310,7 +310,18 @@ struct Control {
   if(zeroFallback){
    if(zeroFallback==1){if(state!=OBS_MEDIA_STATE_PAUSED){playNative(source,true);return;}obs_source_media_set_time(source,0);zeroFallback=2;prepareAt=now;return;}
    if(zeroFallback==2){if(now-prepareAt<80000000ull)return;obs_source_output_video(source,nullptr);obs_source_show_preloaded_video(source);preloadIn=0;stopNative(source);zeroFallback=3;prepareAt=now;return;}
-   if(zeroFallback==3){if(ownStops||now-prepareAt<50000000ull||obs_source_media_get_time(source)>150)return;restartNative(source);playNative(source,true);zeroFallback=4;prepareAt=now;return;}
+   if(zeroFallback==3){
+    if(ownStops||now-prepareAt<50000000ull||obs_source_media_get_time(source)>150)return;
+    if(!active&&!programHold&&state==OBS_MEDIA_STATE_STOPPED&&obs_source_get_width(source)){
+     // Leave the native preview decoder stopped on the already shown cue.
+     // OBS's media button can now restart it directly on the first click.
+     obs_source_show_preloaded_video(source);
+     preparing=false;
+     armed=true;
+     return;
+    }
+    restartNative(source);playNative(source,true);zeroFallback=4;prepareAt=now;return;
+   }
    if(ownPauses)return;
    // A late native Stop completion or user Play can overwrite PAUSED metadata.
    // Reassert the silent hold; zero playback always restarts both streams.
@@ -320,9 +331,9 @@ struct Control {
   if(cueIn==0){if(now-prepareAt<200000000ull)return;zeroFallback=1;playNative(source,true);return;}
   if(now-prepareAt<20000000ull)return;
   auto pos=obs_source_media_get_time(source);
-  if(pos<cueIn-20){if(state==OBS_MEDIA_STATE_PAUSED&&!ownPlays)playNative(source,false);return;}
+  if(!settleAt&&pos<cueIn-20){if(state==OBS_MEDIA_STATE_PAUSED&&!ownPlays)playNative(source,false);return;}
   auto image=reuseStill?std::atomic_load(&still):std::shared_ptr<StillFrame>{};
-  if(cueIn>0&&pos>cueIn+80&&now-prepareAt<500000000ull)return;
+  if(!settleAt&&pos>cueIn+80&&now-prepareAt<500000000ull)return;
   if(!active&&!settleAt){playNative(source,true);settleAt=now+50000000ull;return;}
   if(!active&&(now<settleAt||state!=OBS_MEDIA_STATE_PAUSED)){if(state!=OBS_MEDIA_STATE_PAUSED)playNative(source,true);return;}
   if(!image){
@@ -559,7 +570,7 @@ struct Control {
      if(leavingPreviewPlayback)prepare(source,state,inMs);
      else if(cueIn==0){programHold=true;releaseHold(source);}else {freezeVideo=false;playNative(source,false);}
     }
-    else if(!preparing&&(unloaded||(enabled&&state!=OBS_MEDIA_STATE_PLAYING)||inMs>0))prepare(source,state,inMs);
+    else if(!preparing&&(leavingPreviewPlayback||unloaded||(enabled&&state!=OBS_MEDIA_STATE_PLAYING)||inMs>0))prepare(source,state,inMs);
    }
    if(preparing)prepareTick(source,true);
    if(!preparing&&ended&&state==OBS_MEDIA_STATE_ENDED)playNative(source,true);
@@ -573,23 +584,39 @@ struct Control {
    armed=false;
   } else {
    attachedOnProgram=false;
-   programHold=false;stopRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;
+   programHold=false;stopRequest=false;playAfterCue=false;releasingZero=false;ended=false;
    const bool manualPlay=playRequest.exchange(false);
+   const bool manualRestart=restartRequest.exchange(false);
    const bool manualStop=previewStopRequest.exchange(false);
+   const bool startFromZeroCue=manualPlay&&!manualRestart&&!manualStop&&!previewPlayback&&
+                               enabled&&wasShowing&&!wasActive&&!changed&&appliedRevision==revision&&cueIn==0;
    if(manualPlay&&enabled&&wasShowing&&!wasActive)previewPlayback=true;
-   if(previewPlayback&&!manualStop&&!wasActive&&!changed&&appliedRevision==revision&&state!=OBS_MEDIA_STATE_ENDED&&state!=OBS_MEDIA_STATE_STOPPED){
-    const bool wasPreparing=preparing;
-    if(preparing)prepareTick(source,false);
-    if(!preparing){
-     freezeVideo=false;
-     if((manualPlay||wasPreparing)&&obs_source_media_get_state(source)!=OBS_MEDIA_STATE_PLAYING)playNative(source,false);
-    }
+   if(manualPlay&&previewPlayback&&!manualStop&&!changed&&appliedRevision==revision&&preparing){
+    // A user Play supersedes the pending automatic cue. In particular, do
+    // not finish the cue by pausing immediately after the toolbar starts.
+    const bool decoderWasStopped=zeroFallback==3&&state!=OBS_MEDIA_STATE_PAUSED;
+    preparing=false;
+    armed=false;
+    cancelPoster=true;
+    ++captureGeneration;
+    if(decoderWasStopped&&!startFromZeroCue&&!manualRestart)restartNative(source);
+   }
+   // Keep manual ownership through EOF so OBS can show its stable replay
+   // controls. A user Stop, scene change, or new cue releases this hold.
+   if(previewPlayback&&!manualStop&&!wasActive&&!changed&&appliedRevision==revision&&state!=OBS_MEDIA_STATE_STOPPED){
+    freezeVideo=false;
+    // A native zero cue has already cycled through Stop. Some decoders can
+    // acknowledge Resume yet end immediately. Start it the same way as a
+    // program zero cue. Once playing, Pause/Play still resumes in place.
+    if(startFromZeroCue)restartNative(source);
+    else if(manualPlay&&state==OBS_MEDIA_STATE_PAUSED)playNative(source,false);
     mutePreview=true;
     obs_source_release(source);
     return;
    }
    if(previewPlayback||manualStop){previewPlayback=false;armed=false;}
-   if(!enabled||!wasShowing||wasActive||changed||appliedRevision!=revision||(!armed&&!preparing)||state==OBS_MEDIA_STATE_ENDED||state==OBS_MEDIA_STATE_STOPPED) {
+   if(!enabled||!wasShowing||wasActive||changed||appliedRevision!=revision||
+      (!preparing&&(!armed||state==OBS_MEDIA_STATE_ENDED))) {
     prepare(source,state,inMs,changed);
    } else if(!preparing&&state==OBS_MEDIA_STATE_PLAYING) {
     prepare(source,state,inMs);
@@ -627,7 +654,7 @@ struct Control {
   if(rangeEnded)return "Out 도달 — 마지막 프레임 / 무음 · Play: In부터 다시 재생";
   if(ended)return "재생 완료 — 마지막 프레임 / 무음 · Play: 처음 또는 In부터 다시 재생";
   if(offStopped)return "프로그램·프리뷰 이탈 — 정지 / 무음";
-  if(previewPlayback)return "프리뷰 수동 재생 · 무음";
+  if(previewPlayback)return "프리뷰 수동 확인 · 무음";
   return wasActive?"프로그램 재생 중":"프리뷰 대기 — 선택한 In 지점 정지";
  }
 };

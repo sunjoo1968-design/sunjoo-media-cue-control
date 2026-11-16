@@ -1,6 +1,9 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <QApplication>
+#include <QPointer>
+#include <QAbstractItemView>
+#include <memory>
 #include <QDialog>
 #include <QTimer>
 #include <QWidget>
@@ -32,7 +35,9 @@ static void captureAudio(void*,obs_source_t*,const audio_data *d,bool){for(size_
 static bool previewReady(obs_source_t *clip,int64_t target=0){
  auto *filter=obs_source_get_filter_by_name(clip,"Cue Control");if(!filter)return false;
  auto *p=obs_source_properties(filter);std::string status=obs_property_description(obs_properties_get(p,"status"));obs_properties_destroy(p);obs_source_release(filter);
- auto state=obs_source_media_get_state(clip);auto time=obs_source_media_get_time(clip);bool ready=status.find("프리뷰 대기")!=std::string::npos&&state==OBS_MEDIA_STATE_PAUSED&&std::abs(time-target)<(target?80:150);if(!ready)blog(LOG_INFO,"[FILTER-UI] Cue observation state=%d time=%lld target=%lld status=%s",state,(long long)time,(long long)target,status.c_str());return ready;
+ auto state=obs_source_media_get_state(clip);auto time=obs_source_media_get_time(clip);
+ const bool holding=state==OBS_MEDIA_STATE_PAUSED||(!target&&state==OBS_MEDIA_STATE_STOPPED&&obs_source_get_width(clip));
+ bool ready=status.find("프리뷰 대기")!=std::string::npos&&holding&&std::abs(time-target)<(target?80:150);if(!ready)blog(LOG_INFO,"[FILTER-UI] Cue observation state=%d time=%lld target=%lld status=%s",state,(long long)time,(long long)target,status.c_str());return ready;
 }
 static uint64_t firstHash=0;
 static uint64_t clipHash(obs_source_t *source){
@@ -186,7 +191,7 @@ static void setRange(obs_source_t *clip,double in,double out){auto *f=obs_source
 static void resetRange(obs_source_t *clip){auto *f=obs_source_get_filter_by_name(clip,"Cue Control");auto *p=obs_source_properties(f);obs_property_button_clicked(obs_properties_get(p,"reset_range"),f);obs_properties_destroy(p);obs_source_release(f);}
 static void replayTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
  const int64_t target=(!replayEof||replayIn)?500:0;const int64_t end=replayEof?obs_source_media_get_duration(clip):2000;
- check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED,"Replay test starts from silent preview cue");watchPreview=false;obs_frontend_preview_program_trigger_transition();
+ check(previewReady(clip,target),"Replay test starts from silent preview cue");watchPreview=false;obs_frontend_preview_program_trigger_transition();
  QTimer::singleShot(replayEof?3500:2500,[clip,blank,media,target,end]{
   auto complete=[clip]{return obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED;};check(complete(),"Actual program reaches Out or native EOF");auto picture=clipHash(clip);check(programImage(),"Actual completed program retains a non-black picture");watchPreview=true;previewNoise=0;
   QTimer::singleShot(300,[clip,blank,media,target,end,picture]{
@@ -337,6 +342,88 @@ static void previewPlayTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *m
   });
  });
 }
+static void previewEofTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
+ check(previewReady(clip,0),"Preview starts on the first frame");
+ obs_source_media_play_pause(clip,false);
+ QTimer::singleShot(3800,[clip,blank,media]{
+  check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_ENDED,"Preview EOF stays ended");
+  const auto last=clipHash(clip);
+  QTimer::singleShot(650,[clip,blank,media,last]{
+   check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_ENDED&&clipHash(clip)==last,"Preview EOF holds the final frame without recuing");
+   obs_source_media_stop(clip);
+   QTimer::singleShot(1600,[clip,blank,media]{
+    check(previewReady(clip,0),"Stop after preview EOF restores the cue");
+    finish(clip,blank,media);
+   });
+  });
+ });
+}
+static void previewControlsTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media,obs_sceneitem_t *item){
+ auto *window=static_cast<QWidget*>(obs_frontend_get_main_window());
+ QPushButton *play=nullptr;
+ for(auto *candidate:window->findChildren<QPushButton*>("playPauseButton")){
+  if(candidate->isVisible()){play=candidate;break;}
+ }
+ check(play&&play->isVisible(),"OBS media toolbar Play button is visible");
+ if(!play||!play->isVisible()){finish(clip,blank,media);return;}
+ const QPointer<QPushButton> button=play;
+ const bool resizeTest=qEnvironmentVariableIsSet("FILTER_TEST_RESIZE");
+ if(!resizeTest)obs_source_media_stop(clip);
+ else{
+  vec2 scale={0.45f,0.45f};
+  obs_sceneitem_set_scale(item,&scale);
+ }
+ QTimer::singleShot(100,[clip,blank,media,button,item,resizeTest]{
+  if(!button){check(false,"Toolbar stays present");finish(clip,blank,media);return;}
+  auto *poll=new QTimer(qApp);
+  auto last=std::make_shared<QString>();
+  auto changes=std::make_shared<QStringList>();
+  auto previousTime=std::make_shared<int64_t>(-1);
+  auto previousSlider=std::make_shared<int>(-1);
+  auto reversals=std::make_shared<int>(0);
+  auto sliderReversals=std::make_shared<int>(0);
+  const auto started=os_gettime_ns();
+  QObject::connect(poll,&QTimer::timeout,poll,[clip,button,last,changes,previousTime,previousSlider,reversals,sliderReversals,started]{
+   const auto icon=button&&button->isVisible()?button->property("class").toString():QString("hidden");
+   if(icon!=*last){
+    *last=icon;changes->append(icon);
+    blog(LOG_INFO,"[FILTER-UI] Toolbar t=%llu ms icon=%s state=%d cursor=%lld",
+         (unsigned long long)((os_gettime_ns()-started)/1000000),qPrintable(icon),
+         obs_source_media_get_state(clip),(long long)obs_source_media_get_time(clip));
+   }
+   if(icon!="icon-media-pause")return;
+   const auto time=obs_source_media_get_time(clip);
+   if(*previousTime>=0&&time+40<*previousTime)++*reversals;
+   *previousTime=time;
+   auto *slider=button->parentWidget()->findChild<QSlider*>("slider");
+   if(slider){
+    if(*previousSlider>=0&&slider->value()<*previousSlider)++*sliderReversals;
+    *previousSlider=slider->value();
+   }
+  });
+  poll->start(5);
+  if(resizeTest){
+   if(qEnvironmentVariableIsSet("FILTER_TEST_NATIVE_RESTART"))obs_source_media_restart(clip);
+   else button->click();
+   QTimer::singleShot(1000,poll,[item]{
+    vec2 scale={0.23f,0.23f};
+    obs_sceneitem_set_scale(item,&scale);
+   });
+  }else obs_source_media_play_pause(clip,false);
+  const auto sampleMs=qEnvironmentVariableIsSet("FILTER_TEST_REAL_FILE")?4500:800;
+  QTimer::singleShot(sampleMs,[clip,blank,media,poll,changes,reversals,sliderReversals,previousTime,previousSlider,sampleMs]{
+   poll->stop();poll->deleteLater();
+   blog(LOG_INFO,"[FILTER-UI] Play button icons: %s",qPrintable(changes->join(", ")));
+   const auto playing=changes->indexOf("icon-media-pause");
+   check(playing>=0&&playing==changes->size()-1,"Toolbar stays in playing state after manual Play");
+   check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING,"Preview remains playing");
+   blog(LOG_INFO,"[FILTER-UI] Clock reversals=%d final=%lld slider reversals=%d final=%d",*reversals,(long long)*previousTime,*sliderReversals,*previousSlider);
+   check(!*reversals&&!*sliderReversals,"Preview clock and slider progress without rewinding");
+   if(sampleMs>800)check(*previousTime>3000&&*previousSlider>0,"Preview clock and visible slider advance over several seconds");
+   finish(clip,blank,media);
+  });
+ });
+}
 static void run(){
  hostBaseline=qEnvironmentVariableIsSet("CUE_HOST_BASELINE");
  replayMode=(qEnvironmentVariableIntValue("FILTER_TEST_REPLAY")==1);replayEof=(qEnvironmentVariableIntValue("FILTER_TEST_EOF")==1);replayIn=(qEnvironmentVariableIntValue("FILTER_TEST_REPLAY_IN")==1);resetMode=(qEnvironmentVariableIntValue("FILTER_TEST_RESET")==1);
@@ -353,21 +440,36 @@ static void run(){
  if(clip&&(previewAudioMode||editorMode||standbyMode||replayMode||resetMode))obs_source_add_audio_capture_callback(clip,captureAudio,nullptr);
  rangeMode=(qEnvironmentVariableIntValue("FILTER_TEST_RANGE")==1);
  auto *rangeSettings=obs_data_create();if(rangeMode||standbyIn||(replayMode&&(!replayEof||replayIn))){obs_data_set_double(rangeSettings,"in_seconds",0.5);obs_data_set_double(rangeSettings,"out_seconds",standbyIn?2.0:replayMode?(replayEof?0.0:2.0):1.2);}
- if(!realFile.isEmpty()){
+ if(!realFile.isEmpty()&&!qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_CONTROLS")){
   const bool trimmed=qEnvironmentVariableIsSet("FILTER_TEST_TRIMMED_COPY");
   obs_data_set_double(rangeSettings,"in_seconds",trimmed?0.0:9.625);
   obs_data_set_double(rangeSettings,"out_seconds",trimmed?1.125:10.75);
  }
- auto *control=obs_source_create("sunjoo_media_cue_control","Cue Control",rangeSettings,nullptr);obs_data_release(rangeSettings); if(clip&&control)obs_source_filter_add(clip,control);obs_source_release(control);
+ auto *control=obs_source_create("sunjoo_media_cue_control","Cue Control",rangeSettings,nullptr);obs_data_release(rangeSettings);
+ if(clip&&control){
+  if(qEnvironmentVariableIsSet("FILTER_TEST_NATIVE_RESTART"))obs_source_set_enabled(control,false);
+  obs_source_filter_add(clip,control);
+ }
+ obs_source_release(control);
  check(clip!=nullptr,"Source discovered through real OBS plugin loader");if(!clip){finish(nullptr,nullptr,nullptr);return;}
  auto *blank=obs_scene_create("Cue Blank"),*media=obs_scene_create("Cue Preview");auto *item=obs_scene_add(media,clip);
  obs_video_info vi={};obs_get_video_info(&vi);vec2 scale={};scale.x=scale.y=std::min(float(vi.base_width)/320,float(vi.base_height)/180);obs_sceneitem_set_scale(item,&scale);
  obs_frontend_set_preview_program_mode(false);obs_frontend_set_current_scene(obs_scene_get_source(blank));
  obs_frontend_set_preview_program_mode(true);obs_frontend_set_current_preview_scene(obs_scene_get_source(media));
+ if(qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_CONTROLS")){
+  auto *window=static_cast<QWidget*>(obs_frontend_get_main_window());
+  window->showNormal();
+  window->resize(1400,900);
+  obs_sceneitem_select(item,true);
+  QTimer::singleShot(200,window,[window]{
+   auto *sources=window->findChild<QAbstractItemView*>("sources");
+   if(sources&&sources->model()->rowCount())sources->setCurrentIndex(sources->model()->index(0,0));
+  });
+ }
  obs_frontend_source_list list={};obs_frontend_get_transitions(&list);
  for(size_t i=0;i<list.sources.num;++i)if(!strcmp(obs_source_get_id(list.sources.array[i]),realFile.isEmpty()?"fade_transition":"cut_transition"))obs_frontend_set_current_transition(list.sources.array[i]);
  obs_frontend_source_list_free(&list);obs_frontend_set_transition_duration(600);
- if(!realFile.isEmpty()){
+ if(!realFile.isEmpty()&&!qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_CONTROLS")){
   scale.x=scale.y=1;
   obs_sceneitem_set_scale(item,&scale);
   vec2 bounds={float(vi.base_width),float(vi.base_height)};
@@ -381,7 +483,9 @@ static void run(){
   });
   return;
  }
- QTimer::singleShot(1200,[clip,blank,media]{
+ QTimer::singleShot(1200,[clip,blank,media,item]{
+  if(qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_CONTROLS")){previewControlsTest(clip,blank,media,item);return;}
+  if(qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_EOF")){previewEofTest(clip,blank,media);return;}
   if(qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_PLAY")){previewPlayTest(clip,blank,media);return;}
   if(standbyMode){standbyTest(clip,blank,media);return;}
   if(replayMode){replayTest(clip,blank,media);return;}if(resetMode){resetTest(clip,blank,media);return;}
