@@ -247,7 +247,10 @@ static void realAudio(void *,size_t,audio_data *audio){
 }
 static void realCut(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
  const auto target=qEnvironmentVariableIsSet("FILTER_TEST_TRIMMED_COPY")?0:9625;
- check(previewReady(clip,target),"Real-file In is armed in preview");
+ if(qEnvironmentVariableIsSet("FILTER_TEST_CUT_DURING_PREVIEW_PLAY"))
+  check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING,"Preview plays before real-file Cut");
+ else
+  check(previewReady(clip,target),"Real-file In is armed in preview");
  check(obs_source_get_width(clip)>0&&obs_source_get_height(clip)>0,"Real-file preview has a decoded video frame");
  blog(LOG_INFO,"[FILTER-REAL] preview source=%ux%u hash=%llu",obs_source_get_width(clip),obs_source_get_height(clip),(unsigned long long)clipHash(clip));
  const video_scale_info format={VIDEO_FORMAT_I420,64,36,VIDEO_RANGE_PARTIAL,VIDEO_CS_709};
@@ -310,6 +313,30 @@ static void realCut(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
   });
  });
 }
+static void previewPlayTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
+ const auto still=clipHash(clip);
+ check(previewReady(clip,rangeMode?500:0),"Preview begins on a paused cue");
+ obs_source_add_audio_capture_callback(clip,captureAudio,nullptr);
+ previewNoise=0;
+ obs_source_media_play_pause(clip,false);
+ QTimer::singleShot(700,[clip,blank,media,still]{
+  check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&clipHash(clip)!=still,"Manual Play advances video in preview");
+  check(previewNoise==0,"Manual preview playback stays silent");
+  obs_source_media_play_pause(clip,true);
+  QTimer::singleShot(200,[clip,blank,media]{
+   const auto held=clipHash(clip);
+   QTimer::singleShot(200,[clip,blank,media,held]{
+    check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&clipHash(clip)==held,"Manual Pause holds the preview picture");
+    obs_source_media_stop(clip);
+    QTimer::singleShot(1600,[clip,blank,media]{
+     check(previewReady(clip,rangeMode?500:0),"Preview Stop restores the cue");
+     obs_source_remove_audio_capture_callback(clip,captureAudio,nullptr);
+     finish(clip,blank,media);
+    });
+   });
+  });
+ });
+}
 static void run(){
  hostBaseline=qEnvironmentVariableIsSet("CUE_HOST_BASELINE");
  replayMode=(qEnvironmentVariableIntValue("FILTER_TEST_REPLAY")==1);replayEof=(qEnvironmentVariableIntValue("FILTER_TEST_EOF")==1);replayIn=(qEnvironmentVariableIntValue("FILTER_TEST_REPLAY_IN")==1);resetMode=(qEnvironmentVariableIntValue("FILTER_TEST_RESET")==1);
@@ -346,10 +373,16 @@ static void run(){
   vec2 bounds={float(vi.base_width),float(vi.base_height)};
   obs_sceneitem_set_bounds_type(item,OBS_BOUNDS_SCALE_INNER);
   obs_sceneitem_set_bounds(item,&bounds);
-  QTimer::singleShot(1800,[clip,blank,media]{realCut(clip,blank,media);});
+  QTimer::singleShot(1800,[clip,blank,media]{
+   if(qEnvironmentVariableIsSet("FILTER_TEST_CUT_DURING_PREVIEW_PLAY")){
+    obs_source_media_play_pause(clip,false);
+    QTimer::singleShot(350,[clip,blank,media]{realCut(clip,blank,media);});
+   }else realCut(clip,blank,media);
+  });
   return;
  }
  QTimer::singleShot(1200,[clip,blank,media]{
+  if(qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_PLAY")){previewPlayTest(clip,blank,media);return;}
   if(standbyMode){standbyTest(clip,blank,media);return;}
   if(replayMode){replayTest(clip,blank,media);return;}if(resetMode){resetTest(clip,blank,media);return;}
   if(editorMode){editorTest(clip,blank,media);return;}

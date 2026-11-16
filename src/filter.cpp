@@ -94,6 +94,8 @@ struct Control {
  obs_weak_source_t *parent = nullptr;
  std::recursive_mutex mutex;
  bool managed = false, wasActive = false, wasShowing = false, armed = false, enabled = false;
+ bool previewPlayback = false;
+ std::atomic<bool> previewStopRequest{false};
  bool attachedOnProgram = false;
  bool localFile = false;
  bool nativeUnbuffered = false;
@@ -199,6 +201,8 @@ struct Control {
    // STOP clears async_active before emitting this signal. Expose the existing
    // seek/preload still immediately; the next tick silently re-cues the target.
    c->showStill(source);
+  }else if(source&&obs_source_enabled(c->self)){
+   c->previewStopRequest=true;
   }
  }
  static void played(void *data,calldata_t*){auto *c=static_cast<Control*>(data);if(!consume(c->ownPlays))c->playRequest=true;}
@@ -371,6 +375,7 @@ struct Control {
   if(!source)return;
   const bool run=obs_source_enabled(self);
   if(!run) {
+   previewPlayback=false;previewStopRequest=false;
    playingRange.reset();
    mutePreview=false;
    restore(source);enabled=false;armed=false;wasActive=false;wasShowing=false;preparing=false;offStopped=false;idleAt=0;
@@ -409,6 +414,7 @@ struct Control {
   // Inspect scene-item visibility too: OBS can retain show/active counts briefly
   // while the eye-OFF audio transition is draining.
   if(!visible||(!showing&&!active)) {
+   previewPlayback=false;previewStopRequest=false;
    playingRange.reset();
    programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;freezeVideo=false;
    // A managed clip that leaves both buses must not continue decoding/audio.
@@ -499,6 +505,8 @@ struct Control {
   offStopped=false;
   if(!active)playingRange.reset();
   if(active) {
+   const bool leavingPreviewPlayback=std::exchange(previewPlayback,false);
+   if(leavingPreviewPlayback){playRequest=false;restartRequest=false;}
    if(playingRange&&(stopRequest||playRequest||restartRequest))playingRange.reset();
    if(playingRange){
     outputPreparedRange(source);
@@ -537,7 +545,9 @@ struct Control {
    if(!wasActive) {
     if(armed&&!preparing){
      auto prepared=std::atomic_load(&still);
-     if(canCacheRange&&cueIn>0&&prepared&&prepared->cachedOut==runOut&&prepared->range&&state==OBS_MEDIA_STATE_PAUSED&&programUsesCut()){
+     if(canCacheRange&&cueIn>0&&prepared&&prepared->cachedOut==runOut&&prepared->range&&
+        (state==OBS_MEDIA_STATE_PAUSED||leavingPreviewPlayback)&&programUsesCut()){
+      if(leavingPreviewPlayback){playNative(source,true);showStill(source);}
       playingRange=prepared->range;
       rangeStart=obs_get_video_frame_time();
       rangePicture=rangeSample=0;
@@ -546,7 +556,8 @@ struct Control {
       obs_source_release(source);
       return;
      }
-     if(cueIn==0){programHold=true;releaseHold(source);}else {freezeVideo=false;playNative(source,false);}
+     if(leavingPreviewPlayback)prepare(source,state,inMs);
+     else if(cueIn==0){programHold=true;releaseHold(source);}else {freezeVideo=false;playNative(source,false);}
     }
     else if(!preparing&&(unloaded||(enabled&&state!=OBS_MEDIA_STATE_PLAYING)||inMs>0))prepare(source,state,inMs);
    }
@@ -562,7 +573,22 @@ struct Control {
    armed=false;
   } else {
    attachedOnProgram=false;
-   programHold=false;stopRequest=false;playRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;
+   programHold=false;stopRequest=false;restartRequest=false;playAfterCue=false;releasingZero=false;ended=false;
+   const bool manualPlay=playRequest.exchange(false);
+   const bool manualStop=previewStopRequest.exchange(false);
+   if(manualPlay&&enabled&&wasShowing&&!wasActive)previewPlayback=true;
+   if(previewPlayback&&!manualStop&&!wasActive&&!changed&&appliedRevision==revision&&state!=OBS_MEDIA_STATE_ENDED&&state!=OBS_MEDIA_STATE_STOPPED){
+    const bool wasPreparing=preparing;
+    if(preparing)prepareTick(source,false);
+    if(!preparing){
+     freezeVideo=false;
+     if((manualPlay||wasPreparing)&&obs_source_media_get_state(source)!=OBS_MEDIA_STATE_PLAYING)playNative(source,false);
+    }
+    mutePreview=true;
+    obs_source_release(source);
+    return;
+   }
+   if(previewPlayback||manualStop){previewPlayback=false;armed=false;}
    if(!enabled||!wasShowing||wasActive||changed||appliedRevision!=revision||(!armed&&!preparing)||state==OBS_MEDIA_STATE_ENDED||state==OBS_MEDIA_STATE_STOPPED) {
     prepare(source,state,inMs,changed);
    } else if(!preparing&&state==OBS_MEDIA_STATE_PLAYING) {
@@ -601,6 +627,7 @@ struct Control {
   if(rangeEnded)return "Out 도달 — 마지막 프레임 / 무음 · Play: In부터 다시 재생";
   if(ended)return "재생 완료 — 마지막 프레임 / 무음 · Play: 처음 또는 In부터 다시 재생";
   if(offStopped)return "프로그램·프리뷰 이탈 — 정지 / 무음";
+  if(previewPlayback)return "프리뷰 수동 재생 · 무음";
   return wasActive?"프로그램 재생 중":"프리뷰 대기 — 선택한 In 지점 정지";
  }
 };

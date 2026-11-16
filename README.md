@@ -1,4 +1,6 @@
-# Sunjoo Media Cue Control 0.8.3
+# Sunjoo Media Cue Control 0.8.4
+
+프리뷰에서 OBS 미디어 컨트롤의 Play로 영상을 무음 확인하고, Pause로 현재 화면을 유지하거나 Stop으로 처음 또는 In 지점에 돌아갈 수 있습니다.
 
 제작자: **SunjooAn** · Windows x64 · GPL-2.0-or-later
 
@@ -8,7 +10,7 @@ OBS 기본 **미디어 소스**에 추가하는 재생 제어 필터입니다. �
 
 ## 설치와 사용
 
-0.8.3 빌드의 포터블 설치는 OBS를 종료한 뒤 `release-0.8.3/obs32`의 `obs-plugins` 또는 `release-0.8.3/obs33`의 `plugins`를 해당 OBS 루트에 합칩니다. 아래 설치기 단계는 설치 ZIP을 사용하는 경우에 해당합니다.
+포터블 설치는 OBS를 종료한 뒤 OBS 32용 ZIP의 `obs-plugins` 또는 OBS 33용 ZIP의 `plugins`를 해당 OBS 루트에 합칩니다.
 
 1. 사용 중인 OBS 버전에 맞는 ZIP 전체를 압축 해제합니다. OBS 33.0.0용과 OBS 32.2.2 기준 빌드를 구분했습니다.
 2. OBS를 종료하고 `Install-SunjooMediaCueControl.cmd`를 관리자 권한으로 실행합니다. 기본 설치 경로는 `C:\Program Files\obs-studio`입니다.
@@ -18,7 +20,7 @@ OBS 기본 **미디어 소스**에 추가하는 재생 제어 필터입니다. �
 6. 해당 소스 → **필터** → **오디오/비디오 필터**의 `+` → **Sunjoo Media Cue Control**을 선택합니다. 각 미디어 소스에 하나씩 추가합니다.
 7. 장면을 프리뷰에 올리고 In 지점 준비가 완료된 뒤 전환합니다. 처음 추가했을 때는 In 0 / Out 0으로 전체 영상을 재생합니다.
 
-필터 속성·구간 편집창·DLL 버전 정보에 **SunjooAn / 0.8.3 / 대상 OBS 버전**을 표시합니다. 기존 버전과 필터 ID가 같아 업데이트 시 장면의 필터와 저장한 In/Out을 그대로 사용합니다.
+필터 속성·구간 편집창·DLL 버전 정보에 **SunjooAn / 0.8.4 / 대상 OBS 버전**을 표시합니다. 기존 버전과 필터 ID가 같아 업데이트 시 장면의 필터와 저장한 In/Out을 그대로 사용합니다.
 
 ## 프로그램에서 정지하고 방송 시작 전 대기
 
