@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+namespace cue_editor { struct Picture; }
 namespace cue_range {
 struct DestroyFrame {void operator()(obs_source_frame *frame) const {obs_source_frame_destroy(frame);}};
 struct Video {
@@ -17,5 +18,5 @@ struct Cache {
  std::vector<float> audio[2];
  uint32_t rate=0,channels=0;
 };
-std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,std::atomic<bool> &cancel);
+std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,std::atomic<bool> &cancel,cue_editor::Picture &poster);
 }

@@ -1,5 +1,6 @@
 // Copyright (C) 2026 SunjooAn. SPDX-License-Identifier: GPL-2.0-or-later.
 #include "range-cache.hpp"
+#include "preview-decoder.hpp"
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -41,7 +42,7 @@ void openDecoder(AVCodecContext *&context,const AVStream *stream){
 }
 }
 
-std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,std::atomic<bool> &cancel){
+std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,std::atomic<bool> &cancel,cue_editor::Picture &poster){
  if(in<=0||out<=in||out-in>2000)return {};
  Input reader;
  reader.format=avformat_alloc_context();
@@ -82,6 +83,13 @@ std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,st
        f.color_trc==AVCOL_TRC_SMPTE2084||f.color_trc==AVCOL_TRC_ARIB_STD_B67)
      throw std::runtime_error("Unsupported range video");
     if(cache->video.empty()&&pts>first)throw std::runtime_error("Range starts after In");
+    if(cache->video.empty()){
+     poster.width=f.width;poster.height=f.height;
+     SwsContext *scale=nullptr;
+     try{cue_editor::convertPixels(poster,&f,scale);}
+     catch(...){sws_freeContext(scale);throw;}
+     sws_freeContext(scale);
+    }
     if(!cache->reserve(size_t(f.width+31)/32*32*f.height+2*(size_t((f.width+1)/2+31)/32*32)*((f.height+1)/2)))
      throw std::runtime_error("Range cache limit");
     Video item{uint64_t(std::max<int64_t>(0,pts-first)),std::unique_ptr<obs_source_frame,DestroyFrame>(obs_source_frame_create(VIDEO_FORMAT_I420,f.width,f.height))};

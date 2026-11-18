@@ -69,6 +69,59 @@ int main(int argc,char **argv){
  obs_source_add_audio_capture_callback(mp4.source,audio,nullptr);
  obs_source_inc_showing(obs_scene_get_source(scene));
  preview=obs_scene_get_source(scene);
+ if(GetEnvironmentVariableW(L"CUE_TEST_VISIBILITY",nullptr,0)){
+  auto status=[&]{
+   auto *p=obs_source_properties(mov.filter);
+   std::string text=obs_property_description(obs_properties_get(p,"status"));
+   obs_properties_destroy(p);
+   return text;
+  };
+  auto paused=[&]{return status().find("프리뷰 대기")!=std::string::npos&&obs_source_media_get_time(mov.source)<150;};
+  auto hidden=[&]{return status().find("이탈")!=std::string::npos&&obs_source_media_get_state(mov.source)==OBS_MEDIA_STATE_STOPPED;};
+  auto playing=[&]{return obs_source_media_get_state(mov.source)==OBS_MEDIA_STATE_PLAYING&&obs_source_media_get_time(mov.source)>70;};
+  auto scans=[&]{calldata_t d={};proc_handler_call(obs_source_get_proc_handler(mov.filter),"cue_metrics",&d);auto n=calldata_int(&d,"visibility_scans");calldata_free(&d);return n;};
+  auto *cut=obs_source_create_private("cut_transition","Visibility Cut",nullptr);
+  obs_transition_set(cut,obs_scene_get_source(blank));obs_set_output_source(0,cut);
+  sleep(1500);
+  auto poster=render(mov.source);
+  check(paused()&&!poster.empty(),"Visible grouped clip prepared in preview");
+  auto count=scans();
+  auto cpu=os_cpu_usage_info_start();
+  std::this_thread::sleep_for(std::chrono::seconds(6));
+  printf("VISIBILITY scans=%lld cpu=%.4f\n",(long long)(scans()-count),os_cpu_usage_info_query(cpu));
+  os_cpu_usage_info_destroy(cpu);
+  obs_source_add_audio_capture_callback(mov.source,strictAudio,nullptr);
+  obs_sceneitem_set_visible(mov.item,false);
+  check(until(hidden,200),"Child eye off stops preview before periodic refresh");
+  obs_sceneitem_set_visible(mov.item,true);
+  check(until([&]{return paused()&&render(mov.source)==poster;}),"Child eye on restores preview still");
+  check(unexpectedPreviewSamples==0,"Grouped preview stays silent across eye changes");
+  obs_source_remove_audio_capture_callback(mov.source,strictAudio,nullptr);
+  bool cycles=true;
+  for(int i=0;i<6;++i){
+   obs_transition_start(cut,OBS_TRANSITION_MODE_AUTO,0,obs_scene_get_source(scene));
+   cycles&=until(playing,300);
+   obs_transition_start(cut,OBS_TRANSITION_MODE_AUTO,0,obs_scene_get_source(blank));
+   cycles&=until([&]{return paused()&&render(mov.source)==poster;},1500);
+  }
+  check(cycles,"Six Cut round trips play and restore the grouped preview still");
+  obs_transition_start(cut,OBS_TRANSITION_MODE_AUTO,0,obs_scene_get_source(scene));
+  check(until(playing,300),"Grouped program clip plays");
+  obs_sceneitem_set_visible(mov.item,false);
+  check(until(hidden,200),"Child eye off stops program before periodic refresh");
+  obs_sceneitem_set_visible(mov.item,true);
+  check(until(playing,400),"Child eye on resumes program");
+  obs_sceneitem_set_visible(group,false);
+  check(until(hidden,200),"Parent eye off stops visible child");
+  obs_sceneitem_set_visible(group,true);
+  check(until(playing,400),"Parent eye on resumes child");
+  preview=nullptr;obs_source_remove_audio_capture_callback(mp4.source,audio,nullptr);
+  obs_source_dec_showing(obs_scene_get_source(scene));obs_set_output_source(0,nullptr);obs_source_release(cut);
+  for(auto &c:{mp4,webm,mov}){obs_source_release(c.filter);obs_source_release(c.source);}
+  obs_canvas_scene_remove(scene);obs_scene_release(scene);obs_canvas_scene_remove(blank);obs_scene_release(blank);
+  obs_wait_for_destroy_queue();obs_shutdown();check(bnum_allocs()==0,"No tracked allocations remain");
+  printf("COMPLETE passes=%d failures=%d\n",passes,fails);return fails?1:0;
+ }
  auto ready=[](obs_source_t *s){obs_source_t *f=nullptr;obs_source_enum_filters(s,[](obs_source_t*,obs_source_t *child,void *data){if(!strcmp(obs_source_get_unversioned_id(child),"sunjoo_media_cue_control"))*static_cast<obs_source_t**>(data)=obs_source_get_ref(child);},&f);if(!f)return false;auto *p=obs_source_properties(f);std::string status=obs_property_description(obs_properties_get(p,"status"));obs_properties_destroy(p);obs_source_release(f);return status.find("프리뷰 대기")!=std::string::npos&&obs_source_media_get_state(s)==OBS_MEDIA_STATE_PAUSED&&obs_source_media_get_time(s)<150;};
  check(until([&]{return ready(mp4.source)&&ready(webm.source)&&ready(mov.source);}),"MP4 / WebM VP9 Opus / MOV all pause at preview frame zero");
  sleep(400);

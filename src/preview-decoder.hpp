@@ -12,6 +12,7 @@ extern "C" {
 }
 namespace cue_editor {
 struct Picture {int width=0,height=0;int64_t timeMs=0,nextTimeMs=0;std::vector<uint8_t> rgba;};
+void convertPixels(Picture &picture, const AVFrame *frame, SwsContext *&scale);
 // Video-only reader: never creates an OBS source, mixer, or audio decoder.
 class PreviewDecoder {
  AVFormatContext *format_=nullptr;AVCodecContext *codec_=nullptr;

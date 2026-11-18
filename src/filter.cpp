@@ -30,11 +30,12 @@ bool programUsesCut(){
 constexpr const char *options[] = {"restart_on_activate", "close_when_inactive", "clear_on_media_end"};
 // Video-thread-only scheduler: spread native decoder destruction across frames.
 uint64_t nextIdleRelease=0;
-// Built once per video frame (or topology change), shared by every controller.
+// Rebuild shared visibility on topology changes, with a periodic reconciliation.
 // UUIDs and weak scene watches never keep an unused decoder alive.
 struct VisibilityCache {
  std::atomic<uint64_t> revision{1},queries{0},scans{0};
  uint64_t frame=0,builtRevision=0;
+ bool verifyNextFrame=false;
  std::unordered_set<std::string> visible;
  struct Watch {obs_weak_source_t *weak;signal_handler_t *signals;};
  std::unordered_map<std::string,Watch> watches;
@@ -79,7 +80,11 @@ bool visibleScene(void *param,obs_source_t *source) {
 }
 bool visibleInScene(obs_source_t *source) {
  ++visibility.queries;const auto frame=obs_get_video_frame_time(),revision=visibility.revision.load();
- if(visibility.frame!=frame||visibility.builtRevision!=revision){
+ const bool changed=visibility.builtRevision!=revision;
+ if(changed||(visibility.verifyNextFrame&&visibility.frame!=frame)||frame-visibility.frame>=500000000ull){
+  // A synchronous OBS signal can precede completion of the scene mutation.
+  // Check again on the next tick even if the first reader raced that mutation.
+  visibility.verifyNextFrame=changed;
   visibility.frame=frame;visibility.builtRevision=revision;visibility.visible.clear();VisibleSearch search;
   // Studio Mode program copies are private and absent from enum_scenes.
   auto *output=obs_get_output_source(0);visibleSource(output,search);obs_source_release(output);
@@ -106,7 +111,7 @@ struct Control {
  std::atomic<bool> mutePreview{false};
  std::atomic<int64_t> audioOut{0};
  std::atomic<bool> preparing{false};
- bool priming=false, rangeEnded=false, offStopped=false, loopManaged=false, invalidRange=false, waitingRestart=false;
+ bool priming=false, rangeEnded=false, offStopped=false, rangeLoop=false, invalidRange=false, waitingRestart=false;
  int64_t inMs=0,outMs=0,cueIn=0,runIn=0,runOut=0;
  uint64_t revision=1,appliedRevision=0,prepareAt=0;
  std::string path;
@@ -160,13 +165,21 @@ struct Control {
  void outputPreparedRange(obs_source_t *source){
   const auto tick=obs_get_video_frame_time();
   const auto interval=obs_get_frame_interval_ns();
-  const auto elapsed=tick-rangeStart;
+  auto elapsed=tick-rangeStart;
   const auto duration=uint64_t(runOut-runIn)*1000000;
   const auto &cache=*playingRange;
   if(elapsed>=duration){
-   rangeEnded=true;
-   playingRange.reset();
-   return;
+   if(!rangeLoop){
+    rangeEnded=true;
+    playingRange.reset();
+    return;
+   }
+   rangeStart+=(elapsed/duration)*duration;
+   elapsed=tick-rangeStart;
+   rangeSample=rangePicture=0;
+   auto *first=cache.video.front().frame.get();
+   first->timestamp=tick;
+   obs_source_set_video_frame(source,first);
   }
   if(elapsed){
    const auto previous=rangePicture;
@@ -258,7 +271,6 @@ struct Control {
    if (restoringIdle||!obs_data_get_bool(settings,key))
     obs_data_set_bool(settings,key,obs_data_get_bool(saved,(std::string("original_")+key).c_str()));
   }
-  if(loopManaged){obs_data_set_bool(settings,"looping",obs_data_get_bool(saved,"original_looping"));loopManaged=false;}
   obs_source_update(source,settings);
   obs_source_set_async_unbuffered(source,obs_data_get_bool(saved,"original_unbuffered"));
   obs_data_release(settings);obs_data_release(saved);managed=false;unloaded=false;idleAt=0;
@@ -354,20 +366,27 @@ struct Control {
     try{
      posterJob=std::async(std::launch::async,[this,file=path,target=cueIn,out=outMs,prepareRange=canCacheRange&&!active&&!programHold]()->std::shared_ptr<StillFrame>{
       try{
+       cue_editor::Picture picture;
+       std::shared_ptr<cue_range::Cache> cache;
+       if(prepareRange){
+        try{cache=cue_range::prepare(file,target,out,cancelPoster,picture);}
+        catch(const std::exception &){}
+        if(cancelPoster)return {};
+       }
+       if(!cache){
+       picture={};
        cue_editor::PreviewDecoder decoder(cancelPoster,true);
        decoder.open(file);
-       auto picture=decoder.frameAt(target,[this]{return cancelPoster.load();});
+       picture=decoder.frameAt(target,[this]{return cancelPoster.load();});
        if(picture.rgba.empty()||target<picture.timeMs||target>=picture.nextTimeMs)return {};
+       }
        obs_source_frame frame={};
        frame.format=VIDEO_FORMAT_RGBA;frame.width=picture.width;frame.height=picture.height;
        frame.data[0]=picture.rgba.data();frame.linesize[0]=picture.width*4;frame.full_range=true;
        frame.timestamp=os_gettime_ns();
        auto stillFrame=std::make_shared<StillFrame>(&frame,target);
        stillFrame->cachedOut=out;
-       if(prepareRange){
-        try{stillFrame->range=cue_range::prepare(file,target,out,cancelPoster);}
-        catch(const std::exception &){}
-       }
+       stillFrame->range=std::move(cache);
        return stillFrame;
       }catch(const std::exception &){return {};}
      });
@@ -484,12 +503,16 @@ struct Control {
     path=std::move(current);
     bool settingsChanged=false;
     for(const char *key:options) if(obs_data_get_bool(settings,key)) {obs_data_set_bool(settings,key,false);settingsChanged=true;}
-    if(trimmed) {
-     if(obs_data_get_bool(settings,"looping")){obs_data_set_bool(settings,"looping",false);settingsChanged=true;}
-     loopManaged=true;
-    } else if(loopManaged) {
-     auto *saved=obs_source_get_settings(self);obs_data_set_bool(settings,"looping",obs_data_get_bool(saved,"original_looping"));obs_data_release(saved);settingsChanged=true;loopManaged=false;
+    auto *saved=obs_source_get_settings(self);
+    if(!obs_data_get_bool(saved,"loop_setting_migrated")){
+     if(trimmed&&obs_data_get_bool(saved,"original_looping")&&!obs_data_get_bool(settings,"looping")){
+      obs_data_set_bool(settings,"looping",true);
+      settingsChanged=true;
+     }
+     obs_data_set_bool(saved,"loop_setting_migrated",true);
     }
+    obs_data_release(saved);
+    rangeLoop=trimmed&&obs_data_get_bool(settings,"looping");
     if(settingsChanged)obs_source_update(source,settings);
     managed=true;
    }else path.clear();
@@ -574,7 +597,12 @@ struct Control {
    }
    if(preparing)prepareTick(source,true);
    if(!preparing&&ended&&state==OBS_MEDIA_STATE_ENDED)playNative(source,true);
-   if(!preparing&&!rangeEnded&&runOut>0&&obs_source_media_get_time(source)>=runOut){
+   const auto cursor=obs_source_media_get_time(source);
+   const bool atOut=runOut>0&&cursor>=runOut;
+   const bool wrappedBeforeIn=runIn>0&&state==OBS_MEDIA_STATE_PLAYING&&cursor<runIn-50;
+   if(!preparing&&rangeLoop&&!rangeEnded&&(atOut||wrappedBeforeIn||ended)){
+    prepare(source,state,runIn);
+   }else if(!preparing&&!rangeEnded&&atOut){
     freezeVideo=true;
     playNative(source,true);
     rangeEnded=true;

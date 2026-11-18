@@ -228,7 +228,7 @@ static std::atomic<uint64_t> realCommand{0};
 static std::atomic<bool> realAudioSeen{false};
 static void realVideo(void *,video_data *frame){
  const auto command=realCommand.load(),now=os_gettime_ns();
- if(!command||now-command>450000000)return;
+ if(!command||now-command>(qEnvironmentVariableIsSet("FILTER_TEST_LOOP")?3000000000ull:450000000ull))return;
  uint64_t hash=14695981039346656037ull;
  unsigned sum=0;
  for(unsigned y=0;y<36;++y)for(unsigned x=0;x<64;++x){
@@ -275,6 +275,17 @@ static void realCut(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
    blog(LOG_INFO,"[FILTER-REAL] program matches=%d source hash=%llu",program==obs_scene_get_source(media),(unsigned long long)clipHash(clip));
    obs_source_release(program);
    check(programImage(),"Real-file Cut program GPU output is non-black");
+   if(qEnvironmentVariableIsSet("FILTER_TEST_LOOP")){
+    const auto sound=programSound.load();
+    QTimer::singleShot(2250,[clip,blank,media,sound]{
+     check(programSound.load()>sound+1000,"Program audio continues across range loops");
+     obs_remove_raw_video_callback(realVideo,nullptr);
+     obs_remove_raw_audio_callback(0,realAudio,nullptr);
+     obs_source_remove_audio_capture_callback(clip,captureAudio,nullptr);
+     finish(clip,blank,media);
+    });
+    return;
+   }
    if(qEnvironmentVariableIsSet("FILTER_TEST_CUT_ONLY")){
     QTimer::singleShot(850,[clip,blank,media]{
      const auto outPicture=clipHash(clip);
@@ -431,7 +442,7 @@ static void run(){
  standbyMode=(qEnvironmentVariableIntValue("FILTER_TEST_STANDBY")==1);standbyIn=(qEnvironmentVariableIntValue("FILTER_TEST_STANDBY_IN")==1);
  auto *settings=obs_data_create();obs_data_set_string(settings,"local_file",(editorMode||standbyMode)?((qEnvironmentVariableIntValue("FILTER_TEST_FRACTIONAL")==1)?TEST_FRACTIONAL_FILE:(qEnvironmentVariableIntValue("FILTER_TEST_WEBM")==1)?TEST_EDITOR_WEBM_FILE:TEST_EDITOR_FILE):((qEnvironmentVariableIntValue("FILTER_TEST_WEBM")==1)?TEST_WEBM_FILE:TEST_FILE));
  obs_data_set_bool(settings,"is_local_file",true);obs_data_set_bool(settings,"clear_on_media_end",false);
- if(editorMode)obs_data_set_bool(settings,"looping",true);
+ if(editorMode||qEnvironmentVariableIsSet("FILTER_TEST_LOOP"))obs_data_set_bool(settings,"looping",true);
  const auto realFile=qEnvironmentVariable("FILTER_TEST_REAL_FILE").toUtf8();
  if(!realFile.isEmpty())obs_data_set_string(settings,"local_file",realFile.constData());
  auto *clip=obs_source_create("ffmpeg_source","Media Cue Filter UI test",settings,nullptr);obs_data_release(settings);
@@ -453,9 +464,73 @@ static void run(){
  obs_source_release(control);
  check(clip!=nullptr,"Source discovered through real OBS plugin loader");if(!clip){finish(nullptr,nullptr,nullptr);return;}
  auto *blank=obs_scene_create("Cue Blank"),*media=obs_scene_create("Cue Preview");auto *item=obs_scene_add(media,clip);
+ std::vector<obs_source_t*> batch;
+ if(qEnvironmentVariableIsSet("FILTER_TEST_BATCH")){
+  auto *native=obs_source_get_settings(clip);
+  auto *trim=obs_data_create();obs_data_set_double(trim,"in_seconds",9.625);obs_data_set_double(trim,"out_seconds",9.875);
+  auto *first=obs_source_get_filter_by_name(clip,"Cue Control");obs_source_update(first,trim);obs_source_release(first);
+  batch.push_back(clip);
+  for(int i=1;i<4;++i){
+   const auto label=std::string("Batch clip ")+std::to_string(i);
+   auto *extra=obs_source_create("ffmpeg_source",label.c_str(),native,nullptr);
+   auto *filter=obs_source_create("sunjoo_media_cue_control","Cue Control",trim,nullptr);
+   obs_source_filter_add(extra,filter);obs_source_release(filter);
+   obs_sceneitem_set_order(obs_scene_add(media,extra),OBS_ORDER_MOVE_BOTTOM);
+   batch.push_back(extra);obs_source_release(extra);
+  }
+  obs_data_release(trim);obs_data_release(native);
+  for(auto *s:batch)obs_source_add_audio_capture_callback(s,captureAudio,nullptr);
+ }
  obs_video_info vi={};obs_get_video_info(&vi);vec2 scale={};scale.x=scale.y=std::min(float(vi.base_width)/320,float(vi.base_height)/180);obs_sceneitem_set_scale(item,&scale);
  obs_frontend_set_preview_program_mode(false);obs_frontend_set_current_scene(obs_scene_get_source(blank));
  obs_frontend_set_preview_program_mode(true);obs_frontend_set_current_preview_scene(obs_scene_get_source(media));
+ if(!batch.empty()){
+  auto *timer=new QTimer(qApp);
+  const auto start=os_gettime_ns();
+  auto *cpu=os_cpu_usage_info_start();
+  QObject::connect(timer,&QTimer::timeout,[timer,batch,cpu,start,peak=0.0,last=start,seen=std::vector<bool>(batch.size())]()mutable{
+   const auto now=os_gettime_ns();
+   if(now-last>=50000000){peak=std::max(peak,os_cpu_usage_info_query(cpu));last=now;}
+   bool all=true;
+   for(size_t i=0;i<batch.size();++i){
+    auto *f=obs_source_get_filter_by_name(batch[i],"Cue Control");
+    auto *p=obs_source_properties(f);std::string status=obs_property_description(obs_properties_get(p,"status"));
+    obs_properties_destroy(p);obs_source_release(f);
+    if(status.find("준비 중")!=std::string::npos)seen[i]=true;
+    all&=seen[i]&&status.find("프리뷰 대기")!=std::string::npos;
+   }
+   if(!all&&now-start<1500000000)return;
+   blog(LOG_INFO,"[BATCH] last_ms=%.2f peak_cpu=%.3f",double(now-start)/1e6,peak);
+   check(all,"All four selected In frames ready");
+   for(auto *s:batch){
+    check(clipHash(s)==4001180104363866552ull,"Grouped preparation returns reference In still");
+    obs_source_remove_audio_capture_callback(s,captureAudio,nullptr);
+   }
+   check(previewNoise==0,"All four previews silent during preparation");
+   os_cpu_usage_info_destroy(cpu);timer->stop();timer->deleteLater();
+  });
+  timer->setTimerType(Qt::PreciseTimer);timer->start(10);
+ }
+ if(qEnvironmentVariableIsSet("FILTER_TEST_PREP_METRICS")){
+  auto *timer=new QTimer(qApp);
+  auto cpu=os_cpu_usage_info_start();
+  const auto start=os_gettime_ns(),base=os_get_proc_resident_size();
+  QObject::connect(timer,&QTimer::timeout,[timer,cpu,start,base,peak=base,seen=false,clip]()mutable{
+   auto *filter=obs_source_get_filter_by_name(clip,"Cue Control");
+   auto *props=obs_source_properties(filter);
+   std::string status=obs_property_description(obs_properties_get(props,"status"));
+   obs_properties_destroy(props);obs_source_release(filter);
+   peak=std::max(peak,os_get_proc_resident_size());
+   seen|=status.find("준비 중")!=std::string::npos;
+   const auto ms=(os_gettime_ns()-start)/1e6;
+   const bool ready=seen&&status.find("프리뷰 대기")!=std::string::npos;
+   if(!ready&&ms<1600)return;
+   check(ready,"Observed preview preparation complete");
+   blog(LOG_INFO,"[CUE-BENCH] ms=%.2f cpu=%.3f peak_delta_mib=%.2f",ms,os_cpu_usage_info_query(cpu),double(peak-base)/1048576);
+   os_cpu_usage_info_destroy(cpu);timer->stop();timer->deleteLater();
+  });
+  timer->start(10);
+ }
  if(qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_CONTROLS")){
   auto *window=static_cast<QWidget*>(obs_frontend_get_main_window());
   window->showNormal();
@@ -467,7 +542,7 @@ static void run(){
   });
  }
  obs_frontend_source_list list={};obs_frontend_get_transitions(&list);
- for(size_t i=0;i<list.sources.num;++i)if(!strcmp(obs_source_get_id(list.sources.array[i]),realFile.isEmpty()?"fade_transition":"cut_transition"))obs_frontend_set_current_transition(list.sources.array[i]);
+ for(size_t i=0;i<list.sources.num;++i)if(!strcmp(obs_source_get_id(list.sources.array[i]),realFile.isEmpty()&&!qEnvironmentVariableIsSet("FILTER_TEST_LOOP_CUT")?"fade_transition":"cut_transition"))obs_frontend_set_current_transition(list.sources.array[i]);
  obs_frontend_source_list_free(&list);obs_frontend_set_transition_duration(600);
  if(!realFile.isEmpty()&&!qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_CONTROLS")){
   scale.x=scale.y=1;
@@ -494,6 +569,28 @@ static void run(){
   if(rangeMode){
    check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&std::abs(obs_source_media_get_time(clip)-500)<80,"Real range preview holds selected In point");firstHash=clipHash(clip);
    obs_frontend_preview_program_trigger_transition();
+   if(qEnvironmentVariableIsSet("FILTER_TEST_LOOP")){
+    obs_source_add_audio_capture_callback(clip,captureAudio,nullptr);
+    watchPreview=false;
+    auto *timer=new QTimer(qApp);
+    QObject::connect(timer,&QTimer::timeout,[clip,blank,media,timer,ticks=0,last=int64_t(0),wraps=0,lastPicture=uint64_t(0),lateChanges=0,sound=int64_t(0)]() mutable {
+     const auto cursor=obs_source_media_get_time(clip);
+     if(cursor+250<last)++wraps;
+     last=cursor;
+     const auto picture=clipHash(clip);
+     if(ticks==60)sound=programSound.load();
+     if(ticks>60&&picture!=lastPicture)++lateChanges;
+     lastPicture=picture;
+     if(++ticks<100)return;
+     timer->stop();timer->deleteLater();
+     check(lateChanges>5&&programSound.load()>sound+1000,"Loop continues with moving video and audible samples after multiple Out boundaries");
+     if(!qEnvironmentVariableIsSet("FILTER_TEST_LOOP_CUT"))check(wraps>=2&&cursor<1350,"Native decoder repeatedly wraps the trimmed range");
+     obs_source_remove_audio_capture_callback(clip,captureAudio,nullptr);
+     finish(clip,blank,media);
+    });
+    timer->start(40);
+    return;
+   }
    QTimer::singleShot(220,[clip]{blog(LOG_INFO,"[FILTER-UI] range transition time=%lld",(long long)obs_source_media_get_time(clip));check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&obs_source_media_get_time(clip)>540,"Real range plays from In during transition");check(clipHash(clip)!=firstHash,"Real range GPU picture advances during transition");});
    QTimer::singleShot(1500,[clip,blank,media]{
     check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&obs_source_media_get_time(clip)>=1150&&obs_source_media_get_time(clip)<1300,"Real range stops at selected Out");

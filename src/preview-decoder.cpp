@@ -28,10 +28,14 @@ Picture PreviewDecoder::convert(AVFrame *f){
  auto pts=f->best_effort_timestamp;picture.timeMs=pts==AV_NOPTS_VALUE?0:std::max<int64_t>(0,av_rescale_q(pts-start_,format_->streams[stream_]->time_base,{1,1000}));
  picture.nextTimeMs=pts!=AV_NOPTS_VALUE&&f->duration>0?av_rescale_q(pts-start_+f->duration,format_->streams[stream_]->time_base,{1,1000}):picture.timeMs+int64_t(std::ceil(frameMs));
  picture.nextTimeMs=std::max(picture.timeMs+1,picture.nextTimeMs);
+ convertPixels(picture,f,scale_);
+ return picture;
+}
+void convertPixels(Picture &picture,const AVFrame *f,SwsContext *&scale_){
  picture.rgba.resize(size_t(picture.width)*picture.height*4);
  scale_=sws_getCachedContext(scale_,f->width,f->height,static_cast<AVPixelFormat>(f->format),picture.width,picture.height,AV_PIX_FMT_RGBA,SWS_BILINEAR,nullptr,nullptr,nullptr);if(!scale_)throw std::runtime_error("Preview conversion failed");
  const auto *coeff=sws_getCoefficients(f->colorspace==AVCOL_SPC_BT709?SWS_CS_ITU709:SWS_CS_DEFAULT);sws_setColorspaceDetails(scale_,coeff,f->color_range==AVCOL_RANGE_JPEG,coeff,1,0,1<<16,1<<16);
- uint8_t *data[]={picture.rgba.data(),nullptr,nullptr,nullptr};int stride[]={picture.width*4,0,0,0};require(sws_scale(scale_,f->data,f->linesize,0,f->height,data,stride),"Convert preview");return picture;
+ uint8_t *data[]={picture.rgba.data(),nullptr,nullptr,nullptr};int stride[]={picture.width*4,0,0,0};require(sws_scale(scale_,f->data,f->linesize,0,f->height,data,stride),"Convert preview");
 }
 Picture PreviewDecoder::frameAt(int64_t ms,const std::function<bool()> &cancel){return seek(ms,false,cancel);}
 Picture PreviewDecoder::frameBefore(int64_t ms,const std::function<bool()> &cancel){return ms<=0?seek(0,false,cancel):seek(ms,true,cancel);}
