@@ -3,6 +3,7 @@
 #include "preview-decoder.hpp"
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <stdexcept>
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -42,51 +43,78 @@ void openDecoder(AVCodecContext *&context,const AVStream *stream){
 }
 }
 
-std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,std::atomic<bool> &cancel,cue_editor::Picture &poster){
+struct FreeFrame {void operator()(AVFrame *f)const{av_frame_free(&f);}};
+size_t reservedBytes(){return reserved.load();}
+struct Reader {
+ Input input;
+ std::unique_ptr<Input> audioInput;
+ std::deque<std::unique_ptr<AVFrame,FreeFrame>> carry[2];
+ int v=-1,a=-1;
+ int64_t next=-1;
+ bool eof=false,audioEof=false;
+};
+std::shared_ptr<Reader> makeReader(){return std::make_shared<Reader>();}
+std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,std::atomic<bool> &cancel,cue_editor::Picture *poster,Reader *sequence){
  if(in<=0||out<=in||out-in>2000)return {};
- Input reader;
- reader.format=avformat_alloc_context();
- if(!reader.format||!reader.frame||!reader.packet)return {};
- reader.format->interrupt_callback={[](void *data){return int(static_cast<std::atomic<bool>*>(data)->load());},&cancel};
- AVDictionary *options=nullptr;
- av_dict_set(&options,"protocol_whitelist","file",0);
- const int opened=avformat_open_input(&reader.format,path.c_str(),nullptr,&options);
- av_dict_free(&options);
- require(opened);
- require(avformat_find_stream_info(reader.format,nullptr));
- const int v=av_find_best_stream(reader.format,AVMEDIA_TYPE_VIDEO,-1,-1,nullptr,0);
- const int a=av_find_best_stream(reader.format,AVMEDIA_TYPE_AUDIO,-1,-1,nullptr,0);
- if(v<0)return {};
+ auto local=sequence?nullptr:makeReader();
+ auto &state=sequence?*sequence:*local;
+ auto &reader=state.input;
+ const bool fresh=!reader.format;
+ auto openInput=[&](Input &input){
+  input.format=avformat_alloc_context();
+  if(!input.format||!input.frame||!input.packet)throw std::bad_alloc();
+  input.format->interrupt_callback={[](void *data){return int(static_cast<std::atomic<bool>*>(data)->load());},&cancel};
+  AVDictionary *options=nullptr;
+  av_dict_set(&options,"protocol_whitelist","file",0);
+  const int opened=avformat_open_input(&input.format,path.c_str(),nullptr,&options);
+  av_dict_free(&options);
+  require(opened);
+  require(avformat_find_stream_info(input.format,nullptr));
+ };
+ if(fresh){
+  openInput(reader);
+  state.v=av_find_best_stream(reader.format,AVMEDIA_TYPE_VIDEO,-1,-1,nullptr,0);
+  state.a=av_find_best_stream(reader.format,AVMEDIA_TYPE_AUDIO,-1,-1,nullptr,0);
+  const int v=state.v,a=state.a;
+  if(v<0)return {};
+  const auto *video=reader.format->streams[v];
+  openDecoder(reader.video,video);
+  if(a>=0)openDecoder(reader.audio,reader.format->streams[a]);
+ }else if(state.next!=in)throw std::logic_error("Noncontiguous cue windows");
+ const int v=state.v,a=state.a;
  const auto *video=reader.format->streams[v];
- openDecoder(reader.video,video);
- if(a>=0)openDecoder(reader.audio,reader.format->streams[a]);
  const AVRational ns={1,1000000000};
  const int64_t origin=video->start_time==AV_NOPTS_VALUE?0:av_rescale_q(video->start_time,video->time_base,ns);
  const int64_t first=origin+in*1000000,last=origin+out*1000000;
- require(av_seek_frame(reader.format,v,av_rescale_q_rnd(first,ns,video->time_base,AV_ROUND_DOWN),AVSEEK_FLAG_BACKWARD));
+ if(fresh){
+  const auto keyTime=av_rescale_q_rnd(first,ns,video->time_base,AV_ROUND_DOWN);
+  require(av_seek_frame(reader.format,v,keyTime,AVSEEK_FLAG_BACKWARD));
+  if(sequence&&a>=0){
+   // Independent sequential demux cursors keep interleaved MP4 packet bursts
+   // compressed on disk instead of retaining extra decoded video frames.
+   state.audioInput=std::make_unique<Input>();
+   openInput(*state.audioInput);
+   require(av_seek_frame(state.audioInput->format,v,keyTime,AVSEEK_FLAG_BACKWARD));
+  }
+ }
  auto cache=std::make_shared<CacheStorage>();
  bool videoDone=false,audioDone=a<0;
- auto read=[&](AVCodecContext *decoder,int index,AVPacket *packet){
-  require(avcodec_send_packet(decoder,packet));
-  for(;;){
-   const int result=avcodec_receive_frame(decoder,reader.frame);
-   if(result==AVERROR(EAGAIN)||result==AVERROR_EOF)return;
-   require(result);
-   const auto &f=*reader.frame;
+ auto consume=[&](const AVFrame &f,int index){
    if(f.best_effort_timestamp==AV_NOPTS_VALUE)throw std::runtime_error("Missing range timestamp");
    const auto pts=av_rescale_q(f.best_effort_timestamp,reader.format->streams[index]->time_base,ns);
+   auto &done=index==v?videoDone:audioDone;
+   if(pts>=last){done=true;return true;}
+   const auto length=index==v?av_rescale_q(f.duration,video->time_base,ns):av_rescale_q(f.nb_samples,{1,f.sample_rate},ns);
+   if(pts<first&&length<=first-pts)return false;
    if(index==v){
-    if(pts>=last){videoDone=true;return;}
-    const auto length=av_rescale_q(f.duration,video->time_base,ns);
-    if(pts<first&&length<=first-pts){av_frame_unref(reader.frame);continue;}
     if(f.format!=AV_PIX_FMT_YUV420P||f.width<=0||f.height<=0||f.width>1920||f.height>1080||
        f.color_trc==AVCOL_TRC_SMPTE2084||f.color_trc==AVCOL_TRC_ARIB_STD_B67)
      throw std::runtime_error("Unsupported range video");
     if(cache->video.empty()&&pts>first)throw std::runtime_error("Range starts after In");
-    if(cache->video.empty()){
-     poster.width=f.width;poster.height=f.height;
+    if(cache->video.empty()&&poster){
+     poster->width=f.width;poster->height=f.height;
      SwsContext *scale=nullptr;
-     try{cue_editor::convertPixels(poster,&f,scale);}
+     try{cue_editor::convertPixels(*poster,&f,scale);}
      catch(...){sws_freeContext(scale);throw;}
      sws_freeContext(scale);
     }
@@ -103,7 +131,6 @@ std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,st
     }
     cache->video.push_back(std::move(item));
    }else{
-    if(pts>=last){audioDone=true;return;}
     const int channels=f.ch_layout.nb_channels,rate=f.sample_rate;
     if(f.format!=AV_SAMPLE_FMT_FLTP||channels<1||channels>2||rate<8000||rate>192000)
      throw std::runtime_error("Unsupported range audio");
@@ -121,14 +148,49 @@ std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,st
     if(count>0)for(int ch=0;ch<channels;++ch)
      std::copy_n(reinterpret_cast<const float*>(f.extended_data[ch])+skip,count,cache->audio[ch].begin()+start);
    }
+   return pts+length>last;
+ };
+ for(int side=0;side<2;++side){
+  auto &frames=state.carry[side];
+  while(!frames.empty()){
+   if(consume(*frames.front(),side?a:v))break;
+   frames.pop_front();
+  }
+ }
+ auto read=[&](AVCodecContext *decoder,int index,AVPacket *packet){
+  require(avcodec_send_packet(decoder,packet));
+  for(;;){
+   const int result=avcodec_receive_frame(decoder,reader.frame);
+   if(result==AVERROR(EAGAIN)||result==AVERROR_EOF)return;
+   require(result);
+   if(consume(*reader.frame,index)&&sequence){
+    auto &carry=state.carry[index==v?0:1];
+    if(carry.size()>=(index==v?4u:64u))throw std::runtime_error("Excessive stream interleave");
+    auto frame=std::unique_ptr<AVFrame,FreeFrame>(av_frame_clone(reader.frame));
+    if(!frame)throw std::bad_alloc();
+    carry.push_back(std::move(frame));
+   }
    av_frame_unref(reader.frame);
   }
  };
- while(!cancel&&!(videoDone&&audioDone)){
+ if(sequence){
+  auto advance=[&](Input &input,int stream,AVCodecContext *decoder,bool &done,bool &eof){
+   while(!cancel&&!done&&!eof){
+    const int result=av_read_frame(input.format,input.packet);
+    if(result==AVERROR_EOF){eof=true;read(decoder,stream,nullptr);break;}
+    require(result);
+    if(input.packet->stream_index==stream)read(decoder,stream,input.packet);
+    av_packet_unref(input.packet);
+   }
+  };
+  advance(reader,v,reader.video,videoDone,state.eof);
+  if(a>=0)advance(*state.audioInput,a,reader.audio,audioDone,state.audioEof);
+ }else while(!cancel&&!state.eof&&!(videoDone&&audioDone)){
   const int result=av_read_frame(reader.format,reader.packet);
   if(result==AVERROR_EOF){
+   state.eof=true;
    if(!videoDone)read(reader.video,v,nullptr);
-   if(!audioDone)read(reader.audio,a,nullptr);
+   if(reader.audio&&!audioDone)read(reader.audio,a,nullptr);
    break;
   }
   require(result);
@@ -136,7 +198,8 @@ std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,st
   if(reader.packet->stream_index==a&&!audioDone)read(reader.audio,a,reader.packet);
   av_packet_unref(reader.packet);
  }
- if(cancel||cache->video.size()<2||(a>=0&&!cache->rate))return {};
+ if(cancel||cache->video.size()<(poster?2u:1u)||(a>=0&&!cache->rate))return {};
+ state.next=out;
  return cache;
 }
 }

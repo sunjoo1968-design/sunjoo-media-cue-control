@@ -1,4 +1,4 @@
-# Sunjoo Media Cue Control 0.8.10
+# Sunjoo Media Cue Control 0.8.11
 
 [한국어](README.md) · Author: **SunjooAn** · Windows x64 · GPL-2.0-or-later
 
@@ -22,8 +22,8 @@ Download the ZIP matching your OBS version from [Releases](https://github.com/su
 
 | Package | Tested target |
 |---|---|
-| `OBS32-SunjooMediaCueControl-0.8.10-Windows-x64.zip` | OBS Studio 32.2.2, Windows x64 |
-| `OBS33-SunjooMediaCueControl-0.8.10-Windows-x64.zip` | OBS Studio 33.0.0, Windows x64 |
+| `OBS32-SunjooMediaCueControl-0.8.11-Windows-x64.zip` | OBS Studio 32.2.2, Windows x64 |
+| `OBS33-SunjooMediaCueControl-0.8.11-Windows-x64.zip` | OBS Studio 33.0.0, Windows x64 |
 
 1. Close OBS and extract the complete ZIP.
 2. Run `Install-SunjooMediaCueControl.cmd` as administrator.

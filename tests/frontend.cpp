@@ -226,9 +226,10 @@ static void resetTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
 }
 static std::atomic<uint64_t> realCommand{0};
 static std::atomic<bool> realAudioSeen{false};
+static std::atomic<int> loopInPictures{0};
 static void realVideo(void *,video_data *frame){
  const auto command=realCommand.load(),now=os_gettime_ns();
- if(!command||now-command>(qEnvironmentVariableIsSet("FILTER_TEST_LOOP")?3000000000ull:450000000ull))return;
+ if(!command||now-command>(qEnvironmentVariableIsSet("FILTER_TEST_LONG")?12000000000ull:qEnvironmentVariableIsSet("FILTER_TEST_LOOP")?3000000000ull:450000000ull))return;
  uint64_t hash=14695981039346656037ull;
  unsigned sum=0;
  for(unsigned y=0;y<36;++y)for(unsigned x=0;x<64;++x){
@@ -237,6 +238,8 @@ static void realVideo(void *,video_data *frame){
  }
  blog(LOG_INFO,"[FILTER-REAL] video pts=%llu delivered=%llu hash=%llu luma=%u",
       (unsigned long long)frame->timestamp,(unsigned long long)now,(unsigned long long)hash,sum/(64*36));
+ // Recorded cache-frame references for the portrait and landscape test profiles.
+ if(qEnvironmentVariableIsSet("FILTER_TEST_LONG")&&(hash==18368911847661096589ull||hash==3899586318413795039ull))++loopInPictures;
 }
 static void realAudio(void *,size_t,audio_data *audio){
  const auto command=realCommand.load(),now=os_gettime_ns();
@@ -271,14 +274,31 @@ static void realCut(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
   blog(LOG_INFO,"[FILTER-REAL] Cut command=%llu",(unsigned long long)realCommand.load());
   obs_frontend_preview_program_trigger_transition();
   QTimer::singleShot(500,[clip,blank,media]{
+   if(qEnvironmentVariableIsSet("FILTER_TEST_LONG")){
+    auto *timer=new QTimer(qApp);
+    const bool loop=qEnvironmentVariableIsSet("FILTER_TEST_LOOP");
+    QObject::connect(timer,&QTimer::timeout,[timer,clip,loop,peak=int64_t(0),nativeAdvanced=false]()mutable{
+     auto *filter=obs_source_get_filter_by_name(clip,"Cue Control");
+     calldata_t d={};proc_handler_call(obs_source_get_proc_handler(filter),"cue_metrics",&d);
+     peak=std::max<int64_t>(peak,calldata_int(&d,"range_cache_bytes"));calldata_free(&d);obs_source_release(filter);
+     nativeAdvanced|=obs_source_media_get_time(clip)>9850;
+     const auto sampleUntil=qEnvironmentVariableIsSet("FILTER_TEST_EXTENDED")?25200000000ull:loop?11000000000ull:5200000000ull;
+     if(os_gettime_ns()-realCommand.load()<sampleUntil)return;
+     check(!nativeAdvanced&&peak>0&&peak<=96*1024*1024,"Rolling cache stays bounded and native fallback is unused");
+     blog(LOG_INFO,"[LONG-CACHE] peak_bytes=%lld",(long long)peak);
+     timer->stop();timer->deleteLater();
+    });
+    timer->start(40);
+   }
    auto *program=obs_frontend_get_current_scene();
    blog(LOG_INFO,"[FILTER-REAL] program matches=%d source hash=%llu",program==obs_scene_get_source(media),(unsigned long long)clipHash(clip));
    obs_source_release(program);
    check(programImage(),"Real-file Cut program GPU output is non-black");
    if(qEnvironmentVariableIsSet("FILTER_TEST_LOOP")){
     const auto sound=programSound.load();
-    QTimer::singleShot(2250,[clip,blank,media,sound]{
+    QTimer::singleShot(qEnvironmentVariableIsSet("FILTER_TEST_LONG")?11250:2250,[clip,blank,media,sound]{
      check(programSound.load()>sound+1000,"Program audio continues across range loops");
+     if(qEnvironmentVariableIsSet("FILTER_TEST_LONG"))check(loopInPictures>=2,"Two long-range loops return to the measured In image");
      obs_remove_raw_video_callback(realVideo,nullptr);
      obs_remove_raw_audio_callback(0,realAudio,nullptr);
      obs_source_remove_audio_capture_callback(clip,captureAudio,nullptr);
@@ -287,7 +307,7 @@ static void realCut(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
     return;
    }
    if(qEnvironmentVariableIsSet("FILTER_TEST_CUT_ONLY")){
-    QTimer::singleShot(850,[clip,blank,media]{
+    QTimer::singleShot(qEnvironmentVariableIsSet("FILTER_TEST_EXTENDED")?25200:qEnvironmentVariableIsSet("FILTER_TEST_LONG")?5100:850,Qt::PreciseTimer,[clip,blank,media]{
      const auto outPicture=clipHash(clip);
      previewNoise=0;watchPreview=true;
      QTimer::singleShot(250,[clip,blank,media,outPicture]{
@@ -331,21 +351,22 @@ static void realCut(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
 }
 static void previewPlayTest(obs_source_t *clip,obs_scene_t *blank,obs_scene_t *media){
  const auto still=clipHash(clip);
- check(previewReady(clip,rangeMode?500:0),"Preview begins on a paused cue");
+ const auto target=qEnvironmentVariableIsSet("FILTER_TEST_LONG")?9625:rangeMode?500:0;
+ check(previewReady(clip,target),"Preview begins on a paused cue");
  obs_source_add_audio_capture_callback(clip,captureAudio,nullptr);
  previewNoise=0;
  obs_source_media_play_pause(clip,false);
- QTimer::singleShot(700,[clip,blank,media,still]{
+ QTimer::singleShot(700,[clip,blank,media,still,target]{
   check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PLAYING&&clipHash(clip)!=still,"Manual Play advances video in preview");
   check(previewNoise==0,"Manual preview playback stays silent");
   obs_source_media_play_pause(clip,true);
-  QTimer::singleShot(200,[clip,blank,media]{
+  QTimer::singleShot(200,[clip,blank,media,still,target]{
    const auto held=clipHash(clip);
-   QTimer::singleShot(200,[clip,blank,media,held]{
+   QTimer::singleShot(200,[clip,blank,media,held,still,target]{
     check(obs_source_media_get_state(clip)==OBS_MEDIA_STATE_PAUSED&&clipHash(clip)==held,"Manual Pause holds the preview picture");
     obs_source_media_stop(clip);
-    QTimer::singleShot(1600,[clip,blank,media]{
-     check(previewReady(clip,rangeMode?500:0),"Preview Stop restores the cue");
+    QTimer::singleShot(1600,[clip,blank,media,still,target]{
+     check(previewReady(clip,target)&&clipHash(clip)==still,"Preview Stop restores the cue");
      obs_source_remove_audio_capture_callback(clip,captureAudio,nullptr);
      finish(clip,blank,media);
     });
@@ -454,7 +475,7 @@ static void run(){
  if(!realFile.isEmpty()&&!qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_CONTROLS")){
   const bool trimmed=qEnvironmentVariableIsSet("FILTER_TEST_TRIMMED_COPY");
   obs_data_set_double(rangeSettings,"in_seconds",trimmed?0.0:9.625);
-  obs_data_set_double(rangeSettings,"out_seconds",trimmed?1.125:10.75);
+  obs_data_set_double(rangeSettings,"out_seconds",qEnvironmentVariableIsSet("FILTER_TEST_EXTENDED")?35.0:qEnvironmentVariableIsSet("FILTER_TEST_LONG")?15.0:trimmed?1.125:10.75);
  }
  auto *control=obs_source_create("sunjoo_media_cue_control","Cue Control",rangeSettings,nullptr);obs_data_release(rangeSettings);
  if(clip&&control){
@@ -551,6 +572,7 @@ static void run(){
   obs_sceneitem_set_bounds_type(item,OBS_BOUNDS_SCALE_INNER);
   obs_sceneitem_set_bounds(item,&bounds);
   QTimer::singleShot(1800,[clip,blank,media]{
+   if(qEnvironmentVariableIsSet("FILTER_TEST_PREVIEW_PLAY")){previewPlayTest(clip,blank,media);return;}
    if(qEnvironmentVariableIsSet("FILTER_TEST_CUT_DURING_PREVIEW_PLAY")){
     obs_source_media_play_pause(clip,false);
     QTimer::singleShot(350,[clip,blank,media]{realCut(clip,blank,media);});

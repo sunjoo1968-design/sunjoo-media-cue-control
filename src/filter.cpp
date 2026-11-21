@@ -132,6 +132,28 @@ struct Control {
  std::atomic<int64_t> preloadIn{-1};
  uint64_t settleAt=0;int64_t stillIn=-1;bool reuseStill=false,seekPending=false;int zeroFallback=0;
  std::shared_ptr<cue_range::Cache> playingRange;
+ std::future<std::shared_ptr<cue_range::Cache>> nextWindow;
+ std::shared_ptr<cue_range::Reader> windowReader;
+ std::atomic<bool> cancelWindow{false};
+ int64_t windowIn=0,windowOut=0;
+ uint64_t windowGeneration=0,runGeneration=0;
+ void requestWindow(){
+  if(windowOut>=runOut)return;
+  if(nextWindow.valid()){
+   if(windowGeneration==runGeneration)return;
+   if(nextWindow.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+   nextWindow.get();
+  }
+  cancelWindow=false;
+  windowGeneration=runGeneration;
+  try{
+   if(!windowReader)windowReader=cue_range::makeReader();
+   nextWindow=std::async(std::launch::async,[this,reader=windowReader,file=path,in=windowOut,out=std::min(runOut,windowOut+cue_range::windowMs)]{
+    try{return cue_range::prepare(file,in,out,cancelWindow,nullptr,reader.get());}
+    catch(const std::exception &e){if(!cancelWindow)blog(LOG_WARNING,"[Media Cue Control] Range read at %lld ms: %s",(long long)in,e.what());return std::shared_ptr<cue_range::Cache>{};}
+   });
+  }catch(const std::exception &){}
+ }
  uint64_t rangeStart=0;
  size_t rangePicture=0,rangeSample=0;
  std::atomic<bool> freezeVideo{false};std::atomic<uint64_t> videoSerial{0},posterTs{UINT64_MAX};uint64_t warmSerial=0;
@@ -167,7 +189,8 @@ struct Control {
   const auto interval=obs_get_frame_interval_ns();
   auto elapsed=tick-rangeStart;
   const auto duration=uint64_t(runOut-runIn)*1000000;
-  const auto &cache=*playingRange;
+  bool newWindow=false;
+  const bool wrapped=elapsed>=duration;
   if(elapsed>=duration){
    if(!rangeLoop){
     rangeEnded=true;
@@ -176,19 +199,46 @@ struct Control {
    }
    rangeStart+=(elapsed/duration)*duration;
    elapsed=tick-rangeStart;
+   if(windowIn!=runIn){
+    ++runGeneration;windowReader.reset();
+    auto head=std::atomic_load(&still);
+    if(!head||!head->range){playingRange.reset();prepare(source,obs_source_media_get_state(source),runIn);return;}
+    playingRange=head->range;
+    windowIn=runIn;windowOut=runIn+cue_range::windowMs;
+   }
    rangeSample=rangePicture=0;
-   auto *first=cache.video.front().frame.get();
-   first->timestamp=tick;
-   obs_source_set_video_frame(source,first);
+   newWindow=true;
   }
-  if(elapsed){
+  requestWindow();
+  if(windowOut<runOut&&elapsed>=uint64_t(windowOut-runIn)*1000000){
+   std::shared_ptr<cue_range::Cache> next;
+   if(nextWindow.valid()&&windowGeneration==runGeneration&&nextWindow.wait_for(std::chrono::seconds(0))==std::future_status::ready)next=nextWindow.get();
+   if(!next){
+    blog(LOG_WARNING,"[Media Cue Control] Range buffer unavailable at %lld ms (worker pending: %d)",(long long)windowOut,int(nextWindow.valid()));
+    // Slow storage, an unsupported window, or a full shared cache: continue
+    // on the native decoder without waiting for a worker on the video thread.
+    cancelWindow=true;playingRange.reset();freezeVideo=false;mutePreview=false;
+    obs_source_media_set_time(source,runIn+int64_t(elapsed/1000000));
+    playNative(source,false);return;
+   }
+   playingRange=std::move(next);windowIn=windowOut;
+   windowOut=std::min(runOut,windowIn+cue_range::windowMs);
+   rangeSample=rangePicture=0;newWindow=true;
+   requestWindow();
+  }
+  const auto &cache=*playingRange;
+  const auto windowOffset=uint64_t(windowIn-runIn)*1000000;
+  elapsed-=windowOffset;
+  if(elapsed&&!wrapped){
    const auto previous=rangePicture;
    while(rangePicture+1<cache.video.size()&&cache.video[rangePicture+1].offset<=elapsed+interval/2)++rangePicture;
-   if(rangePicture!=previous){
+   if(rangePicture!=previous||newWindow){
     auto *frame=cache.video[rangePicture].frame.get();
     frame->timestamp=tick;
     obs_source_set_video_frame(source,frame);
    }
+  }else if(newWindow){
+   auto *frame=cache.video.front().frame.get();frame->timestamp=tick;obs_source_set_video_frame(source,frame);
   }
   if(!cache.rate)return;
   const size_t until=std::min(cache.audio[0].size(),size_t((elapsed+interval)*cache.rate/1000000000));
@@ -198,7 +248,7 @@ struct Control {
   audio.samples_per_sec=cache.rate;
   audio.speakers=cache.channels==1?SPEAKERS_MONO:SPEAKERS_STEREO;
   audio.frames=uint32_t(until-rangeSample);
-  audio.timestamp=rangeStart+rangeSample*1000000000ull/cache.rate;
+  audio.timestamp=rangeStart+windowOffset+rangeSample*1000000000ull/cache.rate;
   for(size_t ch=0;ch<cache.channels;++ch)audio.data[ch]=reinterpret_cast<const uint8_t*>(cache.audio[ch].data()+rangeSample);
   rangeAudioSender=this;
   obs_source_output_audio(source,&audio);
@@ -223,8 +273,8 @@ struct Control {
  static void finished(void *data,calldata_t *event){auto *c=static_cast<Control*>(data);auto *s=static_cast<obs_source_t*>(calldata_ptr(event,"source"));if(s&&!c->preparing&&!c->programHold&&obs_source_enabled(c->self)&&obs_source_active(s)){c->ended=true;c->mutePreview=true;}}
  static void restarted(void *data,calldata_t *event){auto *c=static_cast<Control*>(data);const bool internal=consume(c->ownRestarts);if(c->programHold){auto *source=static_cast<obs_source_t*>(calldata_ptr(event,"source"));if(source)c->showStill(source);if(internal&&c->releasingZero.exchange(false))c->programHold=false;}if(!internal){c->restartRequest=true;c->playRequest=true;}}
  static void parentUpdated(void *data,calldata_t*){++static_cast<Control*>(data)->parentRevision;}
- explicit Control(obs_source_t *source) : self(source) {proc_handler_add(obs_source_get_proc_handler(self),"void cue_metrics(out int visibility_queries, out int visibility_scans, out int prepare_requests, out int prepares, out int coalesced)",[](void *d,calldata_t *v){auto *c=static_cast<Control*>(d);calldata_set_int(v,"visibility_queries",visibility.queries);calldata_set_int(v,"visibility_scans",visibility.scans);calldata_set_int(v,"prepare_requests",c->prepareRequests);calldata_set_int(v,"prepares",c->prepares);calldata_set_int(v,"coalesced",c->coalesced);},this);}
- ~Control() { cancelPoster=true;if(posterJob.valid())posterJob.wait();detach(); }
+ explicit Control(obs_source_t *source) : self(source) {proc_handler_add(obs_source_get_proc_handler(self),"void cue_metrics(out int range_cache_bytes, out int visibility_queries, out int visibility_scans, out int prepare_requests, out int prepares, out int coalesced)",[](void *d,calldata_t *v){auto *c=static_cast<Control*>(d);calldata_set_int(v,"range_cache_bytes",cue_range::reservedBytes());calldata_set_int(v,"visibility_queries",visibility.queries);calldata_set_int(v,"visibility_scans",visibility.scans);calldata_set_int(v,"prepare_requests",c->prepareRequests);calldata_set_int(v,"prepares",c->prepares);calldata_set_int(v,"coalesced",c->coalesced);},this);}
+ ~Control() { cancelWindow=true;if(nextWindow.valid())nextWindow.wait();cancelPoster=true;if(posterJob.valid())posterJob.wait();detach(); }
  void attach(obs_source_t *source) {
   std::lock_guard<std::recursive_mutex> lock(mutex);
   parent = obs_source_get_weak_source(source);
@@ -369,7 +419,8 @@ struct Control {
        cue_editor::Picture picture;
        std::shared_ptr<cue_range::Cache> cache;
        if(prepareRange){
-        try{cache=cue_range::prepare(file,target,out,cancelPoster,picture);}
+        const auto end=out-target>2000?target+cue_range::windowMs:out;
+        try{cache=cue_range::prepare(file,target,end,cancelPoster,&picture);}
         catch(const std::exception &){}
         if(cancelPoster)return {};
        }
@@ -401,6 +452,11 @@ struct Control {
  }
  void tick() {
   std::lock_guard<std::recursive_mutex> lock(mutex);
+  if(!playingRange&&nextWindow.valid()){
+   cancelWindow=true;
+   if(nextWindow.wait_for(std::chrono::seconds(0))==std::future_status::ready)nextWindow.get();
+  }
+  if(!playingRange)windowReader.reset();
   auto *source=parent?obs_weak_source_get_source(parent):nullptr;
   if(!source)return;
   const bool run=obs_source_enabled(self);
@@ -583,6 +639,7 @@ struct Control {
         (state==OBS_MEDIA_STATE_PAUSED||leavingPreviewPlayback)&&programUsesCut()){
       if(leavingPreviewPlayback){playNative(source,true);showStill(source);}
       playingRange=prepared->range;
+      ++runGeneration;windowIn=runIn;windowOut=runOut-runIn>2000?runIn+cue_range::windowMs:runOut;
       rangeStart=obs_get_video_frame_time();
       rangePicture=rangeSample=0;
       freezeVideo=true;mutePreview=true;armed=false;wasActive=true;wasShowing=showing;

@@ -18,5 +18,10 @@ struct Cache {
  std::vector<float> audio[2];
  uint32_t rate=0,channels=0;
 };
-std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,std::atomic<bool> &cancel,cue_editor::Picture &poster);
+// Long cues retain the head and at most two rolling windows within the shared budget.
+constexpr int64_t windowMs=250;
+struct Reader;
+std::shared_ptr<Reader> makeReader();
+size_t reservedBytes();
+std::shared_ptr<Cache> prepare(const std::string &path,int64_t in,int64_t out,std::atomic<bool> &cancel,cue_editor::Picture *poster,Reader *sequence=nullptr);
 }
